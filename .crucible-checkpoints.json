@@ -94,5 +94,41 @@
     "message": "pre-write_file",
     "timestamp": 1781210832814,
     "projectPath": "/Users/justin/crucible-local/.crucible/workspace"
+  },
+  {
+    "hash": "cd0f371",
+    "message": "pre-write_file",
+    "timestamp": 1781211635602,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-sess-Cg67x0"
+  },
+  {
+    "hash": "98bc7cd",
+    "message": "pre-write_file",
+    "timestamp": 1781211678934,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-sess-oieIYb"
+  },
+  {
+    "hash": "f65a23b",
+    "message": "pre-write_file",
+    "timestamp": 1781211710808,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-tools-knegfB"
+  },
+  {
+    "hash": "86fd2b2",
+    "message": "pre-write_file",
+    "timestamp": 1781211711462,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-heal-ZfONWH"
+  },
+  {
+    "hash": "de3abac",
+    "message": "pre-write_file",
+    "timestamp": 1781211723891,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-ens-w6SGpn"
+  },
+  {
+    "hash": "d2c1344",
+    "message": "pre-write_file",
+    "timestamp": 1781211724671,
+    "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-sess-ygpLg4"
   }
 ]

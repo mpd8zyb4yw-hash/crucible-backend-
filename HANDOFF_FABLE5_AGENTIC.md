@@ -256,4 +256,4 @@ intact; writes outside `projectPath` are blocked without confirm. Commit.
 | 5 | Planner | ✅ | (this commit) | done — live todo plan/replan, 5-step task e2e (groq TPD hit at tail, honest stop) |
 | 6 | Model strategy | ✅ | (this commit) | done — driver tier + cross-provider fallback; ensemble_solve autonomously fired (edit_distance correct); latency logged (~220s planned path — optimize apply_patch churn later) |
 | 7 | Frontend | ✅ | (this commit) | done — AgentPanel (plan/tools/diffs/terminal/verify) via one reducer; verified live in preview; cross-chunk SSE buffering; cancellable |
-| 8 | State/memory/safety | ☐ | | |
+| 8 | State/memory/safety | ✅ | (this commit) | done — per-project .crucible/ dir, resumable sessions (kill+resume verified), project memory digest, write-outside-root blocked; 15 tests pass |

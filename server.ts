@@ -18,9 +18,11 @@ import { registry } from './src/CrucibleEngine/tools/registry'
 import { fenceProtocolPrompt, parseFenceToolCall, toOpenAITools, fromOpenAIToolCalls } from './src/CrucibleEngine/tools/protocol'
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
-import { makeVerifier } from './src/CrucibleEngine/agent/verify'
+import { makeVerifier, detectCheck } from './src/CrucibleEngine/agent/verify'
 import { nativeDriveTurn, driverComplete, currentDriverLabel } from './src/CrucibleEngine/agent/driver'
 import { needsPlan, runPlannedTask } from './src/CrucibleEngine/agent/planner'
+import { defaultSystemPreamble } from './src/CrucibleEngine/agent/loop'
+import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory } from './src/CrucibleEngine/state/session'
 
 const CIRCUIT_STATE_FILE = path.join(process.cwd(), '.circuit-state.json')
 
@@ -437,18 +439,34 @@ app.post('/api/chat', async (req, res) => {
     res.on('close', () => ac.abort())
 
     const t0 = Date.now()
-    send({ type: 'agent_start', driver: currentDriverLabel(), projectPath })
-    console.log(`[Agent] Starting — driver: ${currentDriverLabel()}, project: ${projectPath}, planned: ${needsPlan(message)}`)
-    if (needsPlan(message)) {
+    // ── Resume a persisted task if one is unfinished for this project ─────────
+    const resumable = req.body.resume === false ? null : latestResumable(projectPath)
+    const memoryDigest = readMemoryDigest(projectPath)
+    send({ type: 'agent_start', driver: currentDriverLabel(), projectPath, resumed: !!resumable })
+    console.log(`[Agent] Starting — driver: ${currentDriverLabel()}, project: ${projectPath}, planned: ${needsPlan(message)}, resume: ${!!resumable}, memory: ${memoryDigest.length}c`)
+
+    if (resumable || needsPlan(message)) {
+      const goal = resumable?.goal ?? message
+      const sessionId = resumable?.id ?? newSessionId(t0)
+      const persist = (steps: any[], completedSummaries: string[], status: 'running' | 'done' | 'failed') =>
+        saveSession({ id: sessionId, goal, projectPath, steps, completedSummaries, status, createdAt: resumable?.createdAt ?? t0, updatedAt: t0 })
       const result = await runPlannedTask({
-        goal: message,
+        goal,
         projectPath,
         driveTurn: nativeDriveTurn,
         planModel: driverComplete,
         emit: send,
         signal: ac.signal,
         makeVerify: () => makeVerifier({ command: req.body.verifyCommand }).verify,
+        memoryDigest,
+        onPersist: persist,
+        resume: resumable ? { steps: resumable.steps, completedSummaries: resumable.completedSummaries } : undefined,
       })
+      // Record the working check command as durable project memory.
+      if (result.ok) {
+        const check = detectCheck(projectPath)
+        if (check) appendMemory(projectPath, `Verify with: \`${check.command}\` (${check.signal})`, t0)
+      }
       send({ type: 'final', text: result.summary })
     } else {
       const verifier = makeVerifier({ command: req.body.verifyCommand })
@@ -459,6 +477,9 @@ app.post('/api/chat', async (req, res) => {
         emit: send,
         signal: ac.signal,
         verify: verifier.verify,
+        systemPreamble: memoryDigest
+          ? `${defaultSystemPreamble(projectPath)}\n\n${memoryDigest}`
+          : undefined,
       })
       if (result.finalText) send({ type: 'final', text: result.finalText })
     }

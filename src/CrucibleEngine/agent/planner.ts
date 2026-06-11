@@ -1,7 +1,7 @@
 // Planner — task decomposition into a compact JSON todo list, executed step-by-step
 // by the agent loop. One strong-model call; no stored chain-of-thought.
 
-import { runAgentLoop, compressObservation } from './loop'
+import { runAgentLoop, compressObservation, defaultSystemPreamble } from './loop'
 import type { AgentLoopResult, DriveTurn, VerifyResult } from './loop'
 import { safeParseJSON } from '../tools/protocol'
 import type { ToolCtx } from '../tools/protocol'
@@ -86,6 +86,12 @@ export interface PlannedTaskOpts {
   signal?: AbortSignal
   makeVerify?: () => (finalText: string, ctx: ToolCtx) => Promise<VerifyResult>
   maxReplans?: number
+  /** Resume a persisted task instead of planning fresh. */
+  resume?: { steps: Step[]; completedSummaries: string[] }
+  /** Called after the plan and after every step transition, for session persistence. */
+  onPersist?: (steps: Step[], completedSummaries: string[], status: 'running' | 'done' | 'failed') => void
+  /** Compressed project-memory digest injected into each step's driver preamble. */
+  memoryDigest?: string
 }
 
 export interface PlannedTaskResult {
@@ -96,13 +102,22 @@ export interface PlannedTaskResult {
 
 /** Execute a multi-step task: plan once, run the loop per step, replan on failure. */
 export async function runPlannedTask(opts: PlannedTaskOpts): Promise<PlannedTaskResult> {
-  const { goal, projectPath, driveTurn, planModel, emit, signal } = opts
-  let steps = await plan(goal, planModel)
-  emit({ type: 'plan', steps: publicSteps(steps) })
+  const { goal, projectPath, driveTurn, planModel, emit, signal, onPersist } = opts
+  let steps: Step[]
+  const completedSummaries: string[] = []
+  if (opts.resume) {
+    // Rehydrate: re-run only the unfinished steps.
+    steps = opts.resume.steps
+    completedSummaries.push(...opts.resume.completedSummaries)
+    emit({ type: 'plan', steps: publicSteps(steps), resumed: true })
+  } else {
+    steps = await plan(goal, planModel)
+    emit({ type: 'plan', steps: publicSteps(steps) })
+  }
+  onPersist?.(steps, completedSummaries, 'running')
 
   let replans = 0
   const maxReplans = opts.maxReplans ?? 1
-  const completedSummaries: string[] = []
 
   for (let i = 0; i < steps.length; i++) {
     if (signal?.aborted) return { ok: false, steps, summary: 'Cancelled.' }
@@ -122,29 +137,36 @@ export async function runPlannedTask(opts: PlannedTaskOpts): Promise<PlannedTask
       signal,
       verify: opts.makeVerify?.(),
       maxIters: 10,
+      systemPreamble: opts.memoryDigest
+        ? `${defaultSystemPreamble(projectPath)}\n\n${opts.memoryDigest}`
+        : undefined,
     })
 
     if (result.ok) {
       step.status = 'done'
       completedSummaries.push(`${step.intent} → ${compressObservation(result.finalText, 300)}`)
       emit({ type: 'step_status', id: step.id, status: 'done', intent: step.intent })
+      onPersist?.(steps, completedSummaries, 'running')   // checkpoint after each step
       continue
     }
 
     step.status = 'failed'
     emit({ type: 'step_status', id: step.id, status: 'failed', intent: step.intent, stopped: result.stopped })
-    if (result.stopped === 'cancelled') return { ok: false, steps, summary: 'Cancelled.' }
+    if (result.stopped === 'cancelled') { onPersist?.(steps, completedSummaries, 'running'); return { ok: false, steps, summary: 'Cancelled.' } }
     if (replans >= maxReplans) {
+      onPersist?.(steps, completedSummaries, 'failed')
       return { ok: false, steps, summary: `Stopped at step ${step.id} ("${step.intent}"): ${result.stopped}.\n${result.finalText}` }
     }
     replans++
     steps = await replan(goal, steps, result.finalText || result.stopped, planModel)
     emit({ type: 'plan', steps: publicSteps(steps), replanned: true })
+    onPersist?.(steps, completedSummaries, 'running')
     i = steps.findIndex(s => s.status !== 'done') - 1   // resume at first pending
   }
 
   const summary = completedSummaries.join('\n')
   emit({ type: 'plan_done', ok: true })
+  onPersist?.(steps, completedSummaries, 'done')
   return { ok: true, steps, summary }
 }
 
