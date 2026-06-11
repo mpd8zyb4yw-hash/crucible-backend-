@@ -188,6 +188,77 @@ interface Round {
   stage2Done: boolean
   activityFeed: Array<{ ts: number; type: string; modelId?: string; message: string }>
   cached: boolean
+  agent?: AgentState | null
+}
+
+// ── Agent state (Section 7) — one reducer over the agent SSE event stream ─────
+interface AgentStep { id: number; intent: string; status: string; doneCheck?: string }
+interface AgentTool { id: string; tool: string; args?: any; ok?: boolean; output?: string; truncated?: boolean; done: boolean }
+interface AgentDiff { ts: number; path: string; old?: string; new?: string; patch?: string }
+interface AgentVerify { ts: number; passed: boolean; signal: string; report: string; escalate?: boolean }
+interface AgentState {
+  active: boolean
+  driver?: string
+  projectPath?: string
+  steps: AgentStep[]
+  replanned?: boolean
+  tools: AgentTool[]
+  diffs: AgentDiff[]
+  terminal: string[]
+  verifies: AgentVerify[]
+  thoughts: string[]
+  final?: string
+  done?: { ok: boolean; stopped: string; iters?: number; toolCallCount?: number; ms?: number }
+  error?: string
+}
+
+const AGENT_EVENT_TYPES = new Set([
+  'agent_start', 'plan', 'step_status', 'tool_call', 'tool_result',
+  'diff', 'verify', 'thought', 'agent_done', 'plan_done', 'agent_error', 'final',
+])
+
+function emptyAgentState(): AgentState {
+  return { active: true, steps: [], tools: [], diffs: [], terminal: [], verifies: [], thoughts: [] }
+}
+
+/** Pure fold of one agent SSE event into AgentState. */
+function agentReducer(state: AgentState | null | undefined, ev: any): AgentState {
+  const s = state ? { ...state } : emptyAgentState()
+  switch (ev.type) {
+    case 'agent_start':
+      return { ...s, active: true, driver: ev.driver, projectPath: ev.projectPath }
+    case 'plan':
+      return { ...s, steps: ev.steps ?? s.steps, replanned: ev.replanned ?? s.replanned }
+    case 'step_status': {
+      const steps = s.steps.map(st => st.id === ev.id ? { ...st, status: ev.status } : st)
+      if (!steps.some(st => st.id === ev.id) && ev.intent) steps.push({ id: ev.id, intent: ev.intent, status: ev.status })
+      return { ...s, steps }
+    }
+    case 'tool_call':
+      return { ...s, tools: [...s.tools, { id: ev.id, tool: ev.tool, args: ev.args, done: false }] }
+    case 'tool_result': {
+      const tools = s.tools.map(t => t.id === ev.id && !t.done ? { ...t, ok: ev.ok, output: ev.output, truncated: ev.truncated, done: true } : t)
+      // Surface run output in a terminal pane.
+      const terminal = ev.tool === 'run' && ev.output ? [...s.terminal, ev.output] : s.terminal
+      return { ...s, tools, terminal }
+    }
+    case 'diff':
+      return { ...s, diffs: [...s.diffs, { ts: Date.now(), path: ev.path, old: ev.old, new: ev.new, patch: ev.patch }] }
+    case 'verify':
+      return { ...s, verifies: [...s.verifies, { ts: Date.now(), passed: ev.passed, signal: ev.signal, report: ev.report, escalate: ev.escalate }] }
+    case 'thought':
+      return ev.text?.trim() ? { ...s, thoughts: [...s.thoughts, ev.text] } : s
+    case 'agent_error':
+      return { ...s, error: ev.error, active: false }
+    case 'agent_done':
+      return { ...s, done: { ok: ev.ok, stopped: ev.stopped, iters: ev.iters, toolCallCount: ev.toolCallCount, ms: ev.ms } }
+    case 'plan_done':
+      return { ...s, active: false }
+    case 'final':
+      return { ...s, final: ev.text, active: false }
+    default:
+      return s
+  }
 }
 
 function emptyRound(id: string, userMessage: string): Round {
@@ -205,6 +276,7 @@ function emptyRound(id: string, userMessage: string): Round {
     remediated: {}, linterStatus: {},
     avgScores: {}, stage2Done: false,
     activityFeed: [],
+    agent: null,
   }
 }
 
@@ -506,6 +578,142 @@ function CritiqueGrid({ round, onToggle }: { round: Round; onToggle: (critic: st
   )
 }
 
+// ── Agent panel (Section 7) — live loop surface ───────────────────────────────
+const STEP_GLYPH: Record<string, string> = { pending: '○', active: '◐', done: '●', failed: '✕' }
+const STEP_COLOR: Record<string, string> = { pending: '#555', active: '#7c7cf8', done: '#4ade80', failed: '#f87171' }
+const TOOL_GLYPH: Record<string, string> = {
+  write_file: '✎', edit_file: '✎', apply_patch: '✎', read_file: '📖',
+  list_dir: '📁', search: '🔍', run: '▸', ensemble_solve: '✦',
+}
+
+function DiffBlock({ d }: { d: AgentDiff }) {
+  const rel = d.path.split('/').slice(-2).join('/')
+  return (
+    <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10.5, lineHeight: 1.5, marginTop: 4 }}>
+      <div style={{ color: '#888', marginBottom: 2 }}>{rel}</div>
+      {d.patch ? (
+        <pre style={{ margin: 0, whiteSpace: 'pre-wrap' as const }}>
+          {d.patch.split('\n').map((ln, i) => (
+            <div key={i} style={{
+              background: ln.startsWith('+') ? 'rgba(74,222,128,0.12)' : ln.startsWith('-') ? 'rgba(248,113,113,0.12)' : 'transparent',
+              color: ln.startsWith('+') ? '#86efac' : ln.startsWith('-') ? '#fca5a5' : '#999', padding: '0 4px',
+            }}>{ln || ' '}</div>
+          ))}
+        </pre>
+      ) : (
+        <pre style={{ margin: 0, whiteSpace: 'pre-wrap' as const }}>
+          {(d.old ?? '').split('\n').map((ln, i) => <div key={'o' + i} style={{ background: 'rgba(248,113,113,0.12)', color: '#fca5a5', padding: '0 4px' }}>- {ln}</div>)}
+          {(d.new ?? '').split('\n').map((ln, i) => <div key={'n' + i} style={{ background: 'rgba(74,222,128,0.12)', color: '#86efac', padding: '0 4px' }}>+ {ln}</div>)}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function ToolRow({ t }: { t: AgentTool }) {
+  const [open, setOpen] = useState(false)
+  const color = t.done ? (t.ok ? '#4ade80' : '#f87171') : '#7c7cf8'
+  const label = t.tool === 'run' && t.args?.command ? t.args.command
+    : t.tool === 'search' && t.args?.pattern ? `/${t.args.pattern}/`
+    : (t.args?.path ?? t.args?.subprompt?.slice?.(0, 60) ?? '')
+  return (
+    <div style={{ borderLeft: `2px solid ${color}`, paddingLeft: 8, marginBottom: 3 }}>
+      <div onClick={() => t.output && setOpen(o => !o)} style={{
+        display: 'flex', alignItems: 'center', gap: 6, cursor: t.output ? 'pointer' : 'default',
+        fontSize: 11, color: '#bbb', fontFamily: 'ui-monospace, monospace',
+      }}>
+        <span style={{ color }}>{t.done ? (t.ok ? '✓' : '✕') : (TOOL_GLYPH[t.tool] ?? '·')}</span>
+        <span style={{ fontWeight: 600, color: '#ddd' }}>{t.tool}</span>
+        <span style={{ color: '#777', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, flex: 1 }}>{String(label)}</span>
+        {t.output && <span style={{ color: '#555', fontSize: 9 }}>{open ? '▾' : '▸'}</span>}
+      </div>
+      {open && t.output && (
+        <pre style={{
+          margin: '3px 0 0', padding: 6, background: 'rgba(0,0,0,0.4)', borderRadius: 4,
+          fontSize: 10, color: '#9a9', whiteSpace: 'pre-wrap' as const, maxHeight: 200, overflow: 'auto',
+        }}>{t.output}{t.truncated ? '\n…(truncated)' : ''}</pre>
+      )}
+    </div>
+  )
+}
+
+function AgentPanel({ agent }: { agent: AgentState }) {
+  const verifyByLatest = agent.verifies[agent.verifies.length - 1]
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.34,1.2,0.64,1)',
+      border: '1px solid rgba(124,124,248,0.18)', borderRadius: 12, padding: 12,
+      background: 'rgba(124,124,248,0.04)', display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, color: '#7c7cf8', fontWeight: 700 }}>
+        <span style={{ animation: agent.active ? 'fadeIn 0.5s ease-in-out infinite alternate' : 'none' }}>
+          {agent.active ? 'agent working' : agent.done?.ok ? 'agent complete' : agent.error ? 'agent error' : 'agent finished'}
+        </span>
+        {agent.driver && <span style={{ color: '#555', textTransform: 'none' as const, letterSpacing: 0 }}>· {agent.driver}</span>}
+        <div style={{ flex: 1 }} />
+        {agent.done?.ms != null && <span style={{ color: '#555', textTransform: 'none' as const, letterSpacing: 0 }}>{(agent.done.ms / 1000).toFixed(1)}s</span>}
+      </div>
+
+      {/* Plan checklist */}
+      {agent.steps.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {agent.steps.map(st => (
+            <div key={st.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, fontSize: 11.5, color: st.status === 'done' ? '#777' : '#ccc' }}>
+              <span style={{ color: STEP_COLOR[st.status] ?? '#555', flexShrink: 0 }}>{STEP_GLYPH[st.status] ?? '○'}</span>
+              <span style={{ textDecoration: st.status === 'done' ? 'line-through' : 'none' }}>{st.intent}</span>
+            </div>
+          ))}
+          {agent.replanned && <div style={{ fontSize: 9, color: '#fbbf24' }}>↻ replanned</div>}
+        </div>
+      )}
+
+      {/* Tool timeline */}
+      {agent.tools.length > 0 && (
+        <div>
+          <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>tools · {agent.tools.length}</div>
+          {agent.tools.map((t, i) => <ToolRow key={`${t.id}:${i}`} t={t} />)}
+        </div>
+      )}
+
+      {/* Diffs */}
+      {agent.diffs.length > 0 && (
+        <div>
+          <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>changes · {agent.diffs.length}</div>
+          {agent.diffs.slice(-4).map((d, i) => <DiffBlock key={i} d={d} />)}
+        </div>
+      )}
+
+      {/* Terminal */}
+      {agent.terminal.length > 0 && (
+        <div>
+          <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>terminal</div>
+          <pre style={{
+            margin: 0, padding: 8, background: 'rgba(0,0,0,0.5)', borderRadius: 6,
+            fontSize: 10, lineHeight: 1.5, color: '#9fef9f', fontFamily: 'ui-monospace, monospace',
+            whiteSpace: 'pre-wrap' as const, maxHeight: 180, overflow: 'auto',
+          }}>{agent.terminal.slice(-3).join('\n')}</pre>
+        </div>
+      )}
+
+      {/* Verify badge */}
+      {verifyByLatest && (
+        <div style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+          padding: '4px 10px', borderRadius: 8, fontSize: 10.5, fontWeight: 600,
+          background: verifyByLatest.passed ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)',
+          color: verifyByLatest.passed ? '#86efac' : '#fca5a5',
+          border: `1px solid ${verifyByLatest.passed ? 'rgba(74,222,128,0.3)' : 'rgba(248,113,113,0.3)'}`,
+        }}>
+          {verifyByLatest.passed ? '✓ verified' : verifyByLatest.escalate ? '✕ unfixable — stopped' : '↻ healing'} · {verifyByLatest.signal}
+        </div>
+      )}
+
+      {agent.error && <div style={{ fontSize: 11, color: '#fca5a5' }}>⚠ {agent.error}</div>}
+    </div>
+  )
+}
+
 export default function App() {
   const [rounds, setRounds]               = useState<Round[]>([])
   const [input, setInput]                 = useState('')
@@ -590,16 +798,31 @@ export default function App() {
     }
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
+    let sseBuf = ''
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      const lines = decoder.decode(value).split('\n').filter(l => l.startsWith('data: '))
+      // Buffer across chunks: SSE events (esp. agent diffs/output) can span reads.
+      sseBuf += decoder.decode(value, { stream: true })
+      const chunkLines = sseBuf.split('\n')
+      sseBuf = chunkLines.pop() ?? ''
+      const lines = chunkLines.filter(l => l.startsWith('data: '))
       for (const line of lines) {
         const raw = line.slice(6)
         if (raw === '[DONE]') break
         try {
           const parsed = JSON.parse(raw)
+
+          // ── Agent loop events (Section 7) — fold through one reducer ────────
+          if (AGENT_EVENT_TYPES.has(parsed.type)) {
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, agent: agentReducer(r.agent, parsed) }))
+            if (parsed.type === 'final') {
+              // Agent's final summary doubles as the round's synthesis text.
+              setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, synthesis: parsed.text ?? r.synthesis, synthesisDone: true }))
+            }
+            continue
+          }
 
           // ── Model selection (first event) ──────────────────────────────────
           if (parsed.type === 'model_selection') {
@@ -1083,6 +1306,9 @@ export default function App() {
                   {round.userMessage}
                 </div>
               </div>
+
+              {/* Agent loop panel (Section 7) */}
+              {round.agent && <AgentPanel agent={round.agent} />}
 
               {/* Expanded response panel */}
               {round.expandedModel && models.length > 0 && (() => {

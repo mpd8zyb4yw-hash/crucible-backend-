@@ -22,6 +22,7 @@ const MAX_HEAL_ATTEMPTS = 3
 export function makeVerifier(opts: { command?: string } = {}): Verifier {
   const fingerprints = new Set<string>()
   let attempts = 0
+  let runSeq = 0
 
   return {
     healAttempts: () => attempts,
@@ -32,7 +33,7 @@ export function makeVerifier(opts: { command?: string } = {}): Verifier {
       if (!plan) return { passed: true, signal: 'none', report: 'No runnable check detected.' }
 
       const result = await registry.exec(
-        { id: 'verify', name: 'run', args: { command: plan.command, timeoutMs: 60_000 } },
+        { id: `verify_${runSeq++}`, name: 'run', args: { command: plan.command, timeoutMs: 60_000 } },
         { ...ctx, allowMutation: true },
       )
       if (result.ok) return { passed: true, signal: plan.signal, report: result.output.slice(0, 2000) }
