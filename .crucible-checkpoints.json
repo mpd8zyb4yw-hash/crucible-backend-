@@ -16,5 +16,17 @@
     "message": "pre-write_file",
     "timestamp": 1781195349248,
     "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-heal-Un14Wk"
+  },
+  {
+    "hash": "bec961e",
+    "message": "pre-write_file",
+    "timestamp": 1781195509938,
+    "projectPath": "/Users/justin/crucible-local/.crucible/workspace"
+  },
+  {
+    "hash": "d80baec",
+    "message": "pre-write_file",
+    "timestamp": 1781195571037,
+    "projectPath": "/Users/justin/crucible-local/.crucible/workspace"
   }
 ]

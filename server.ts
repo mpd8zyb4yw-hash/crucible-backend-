@@ -18,8 +18,9 @@ import { registry } from './src/CrucibleEngine/tools/registry'
 import { fenceProtocolPrompt, parseFenceToolCall, toOpenAITools, fromOpenAIToolCalls } from './src/CrucibleEngine/tools/protocol'
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
-import type { DriveTurn } from './src/CrucibleEngine/agent/loop'
 import { makeVerifier } from './src/CrucibleEngine/agent/verify'
+import { nativeDriveTurn, driverComplete, DRIVER_MODEL } from './src/CrucibleEngine/agent/driver'
+import { needsPlan, runPlannedTask } from './src/CrucibleEngine/agent/planner'
 
 const CIRCUIT_STATE_FILE = path.join(process.cwd(), '.circuit-state.json')
 
@@ -362,22 +363,6 @@ app.post('/api/prewarm', async (req, res) => {
   res.json({ ok: true, modelIds })
 })
 
-// ── Agent driver (section 2; section 6 adds tiered selection) ────────────────
-const DRIVER_MODEL = 'llama-3.3-70b-versatile'
-
-const nativeDriveTurn: DriveTurn = async (messages, tools, _signal) => {
-  recordProviderCall('groq')
-  const res = await groq.chat.completions.create({
-    model: DRIVER_MODEL,
-    messages: messages as any,
-    tools: toOpenAITools(tools) as any,
-    tool_choice: 'auto',
-    temperature: 0.2,
-  } as any)
-  const msg = res.choices[0]?.message
-  return { text: stripThink(msg?.content ?? ''), toolCalls: fromOpenAIToolCalls(msg) }
-}
-
 /** Imperative coding request that wants actions, not just an answer. */
 function detectAgentTask(message: string): boolean {
   return /\b(create|write|build|make|add|implement|fix|refactor|update|generate|run|execute|test)\b/i.test(message) &&
@@ -406,17 +391,31 @@ app.post('/api/chat', async (req, res) => {
     res.on('close', () => ac.abort())
 
     send({ type: 'agent_start', driver: DRIVER_MODEL, projectPath })
-    console.log(`[Agent] Starting loop — driver: ${DRIVER_MODEL}, project: ${projectPath}`)
-    const verifier = makeVerifier({ command: req.body.verifyCommand })
-    const result = await runAgentLoop({
-      goal: message,
-      projectPath,
-      driveTurn: nativeDriveTurn,
-      emit: send,
-      signal: ac.signal,
-      verify: verifier.verify,
-    })
-    if (result.finalText) send({ type: 'final', text: result.finalText })
+    console.log(`[Agent] Starting — driver: ${DRIVER_MODEL}, project: ${projectPath}, planned: ${needsPlan(message)}`)
+    recordProviderCall('groq')
+    if (needsPlan(message)) {
+      const result = await runPlannedTask({
+        goal: message,
+        projectPath,
+        driveTurn: nativeDriveTurn,
+        planModel: driverComplete,
+        emit: send,
+        signal: ac.signal,
+        makeVerify: () => makeVerifier({ command: req.body.verifyCommand }).verify,
+      })
+      send({ type: 'final', text: result.summary })
+    } else {
+      const verifier = makeVerifier({ command: req.body.verifyCommand })
+      const result = await runAgentLoop({
+        goal: message,
+        projectPath,
+        driveTurn: nativeDriveTurn,
+        emit: send,
+        signal: ac.signal,
+        verify: verifier.verify,
+      })
+      if (result.finalText) send({ type: 'final', text: result.finalText })
+    }
     res.write('data: [DONE]\n\n')
     res.end()
     return
