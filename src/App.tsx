@@ -1215,6 +1215,7 @@ export default function App() {
         * { box-sizing: border-box; }
         @keyframes prism { 0% { filter: hue-rotate(0deg) brightness(1.3) saturate(1.8); } 100% { filter: hue-rotate(360deg) brightness(1.3) saturate(1.8); } }
         @keyframes arrowToRing { 0% { transform: rotate(0deg) scale(1); opacity: 1; } 60% { transform: rotate(140deg) scale(0.5); opacity: 0.5; } 100% { transform: rotate(180deg) scale(1); opacity: 1; } }
+        @keyframes studioIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
       `}</style>
 
       <ShimmerBg thinking={thinking} />

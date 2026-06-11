@@ -1,21 +1,19 @@
-// LeftDock — a frosted-glass panel on the left edge, inline with the chat bar.
-// Collapsed: a small pill whose opacity rises as the cursor approaches (JS-driven proximity).
-// Expanded: two flat tabs — "collab" (refined model/collaboration surface) and
-// "code" (a sandboxed editor with a file tree, live run, and preview).
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { MODEL_REGISTRY } from './modelData'
+// Code Studio — the slide-in "code" mode. Collab (the main chat UI) is the default;
+// clicking the Code pill slides this in from the left, "collab →" slides it back out right.
+//
+// Vision: prompt-to-preview canvas. The live preview is the hero. One warm prompt:
+// "Describe what you want to make…". The Crucible ensemble generates a complete standalone
+// HTML document, which renders live in an iframe. Refine by describing changes. A tucked-away
+// "peek at code" reveals the source. Zero jargon — grandma can vibe-code here.
+import { useState, useEffect, useRef } from 'react'
 
 const API = 'http://localhost:3001'
 
-// ── proximity opacity hook ────────────────────────────────────────────────────
-// Returns an opacity that ramps from `min` (far) to `max` (very close) based on the
-// cursor's distance to the referenced element. Full intensity only within `near` px.
-function useProximityOpacity(ref: React.RefObject<HTMLElement | null>, opts?: { near?: number; far?: number; min?: number; max?: number }) {
+// ── proximity glow for the collapsed pill ─────────────────────────────────────
+function useProximityOpacity(ref: React.RefObject<HTMLElement | null>, opts?: { near?: number; far?: number }) {
   const near = opts?.near ?? 40
-  const far = opts?.far ?? 320
-  const min = opts?.min ?? 0.18
-  const max = opts?.max ?? 0.92
-  const [opacity, setOpacity] = useState(min)
+  const far = opts?.far ?? 340
+  const [opacity, setOpacity] = useState(0)
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const el = ref.current
@@ -24,285 +22,215 @@ function useProximityOpacity(ref: React.RefObject<HTMLElement | null>, opts?: { 
       const cx = Math.max(r.left, Math.min(e.clientX, r.right))
       const cy = Math.max(r.top, Math.min(e.clientY, r.bottom))
       const d = Math.hypot(e.clientX - cx, e.clientY - cy)
-      // ease-in so it only "lights up" as you get genuinely close
       const t = 1 - Math.min(1, Math.max(0, (d - near) / (far - near)))
-      const eased = t * t
-      setOpacity(min + (max - min) * eased)
+      setOpacity(t * t) // ease-in: ignites only when close
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [ref, near, far, min, max])
+  }, [ref, near, far])
   return opacity
 }
 
-// ── file tree ─────────────────────────────────────────────────────────────────
-interface TreeNode { name: string; path: string; isDir: boolean; children?: TreeNode[] }
-
-function FileTree({ nodes, active, onOpen, depth = 0 }: {
-  nodes: TreeNode[]; active: string | null; onOpen: (p: string) => void; depth?: number
-}) {
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
-  return (
-    <>
-      {nodes.map(n => (
-        <div key={n.path}>
-          <div
-            onClick={() => n.isDir ? setCollapsed(c => ({ ...c, [n.path]: !c[n.path] })) : onOpen(n.path)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
-              padding: '2px 6px', paddingLeft: 6 + depth * 12, borderRadius: 4,
-              fontSize: 11.5, color: active === n.path ? '#c8c8f8' : '#9a9aad',
-              background: active === n.path ? 'rgba(124,124,248,0.12)' : 'transparent',
-              fontFamily: 'ui-monospace, monospace', whiteSpace: 'nowrap',
-            }}
-          >
-            <span style={{ fontSize: 9, color: '#555', width: 8 }}>{n.isDir ? (collapsed[n.path] ? '▸' : '▾') : ''}</span>
-            <span style={{ fontSize: 11 }}>{n.isDir ? '📁' : '📄'}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{n.name}</span>
-          </div>
-          {n.isDir && !collapsed[n.path] && n.children && (
-            <FileTree nodes={n.children} active={active} onOpen={onOpen} depth={depth + 1} />
-          )}
-        </div>
-      ))}
-    </>
-  )
+// Pull a complete HTML document out of a model answer (fenced ```html, raw <!DOCTYPE,
+// or — as a fallback — wrap a bare snippet so something always renders).
+function extractHtml(text: string): string {
+  const fenced = text.match(/```(?:html)?\s*\n([\s\S]*?)```/i)
+  const body = fenced ? fenced[1] : text
+  const doc = body.match(/<!DOCTYPE[\s\S]*<\/html>/i) || body.match(/<html[\s\S]*<\/html>/i)
+  if (doc) return doc[0]
+  if (/<\/\w+>/.test(body)) return `<!DOCTYPE html><html><body style="margin:0">${body}</body></html>`
+  return body.trim()
 }
 
-// ── code tab ──────────────────────────────────────────────────────────────────
-function CodeTab() {
-  const [tree, setTree] = useState<TreeNode[]>([])
-  const [activePath, setActivePath] = useState<string | null>(null)
-  const [content, setContent] = useState('')
-  const [dirty, setDirty] = useState(false)
-  const [output, setOutput] = useState('')
-  const [running, setRunning] = useState(false)
-  const [showPreview, setShowPreview] = useState(false)
-  const [editorW, setEditorW] = useState(0.55) // fraction of the right pane for the editor
-  // local undo/redo history for the open file (snapshots on save)
-  const history = useRef<string[]>([])
-  const histIdx = useRef(-1)
-
-  const refreshTree = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/api/sandbox/tree`).then(r => r.json())
-      setTree(r.tree ?? [])
-    } catch { /* backend offline */ }
-  }, [])
-  useEffect(() => { refreshTree() }, [refreshTree])
-
-  const open = async (p: string) => {
-    const r = await fetch(`${API}/api/sandbox/read`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p }),
-    }).then(r => r.json())
-    if (r.success) {
-      setActivePath(p); setContent(r.content); setDirty(false)
-      history.current = [r.content]; histIdx.current = 0
+// Read an /api/chat SSE stream, advancing a progress callback on stage events and
+// resolving with the final synthesis text.
+async function runEnsemble(message: string, onStage: () => void, signal: AbortSignal): Promise<string> {
+  const res = await fetch(`${API}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, agentMode: false }), signal,
+  })
+  const reader = res.body!.getReader()
+  const dec = new TextDecoder()
+  let buf = '', synthesis = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const chunks = buf.split('\n\n'); buf = chunks.pop() ?? ''
+    for (const c of chunks) {
+      const line = c.split('\n').find(l => l.startsWith('data: '))
+      if (!line) continue
+      try {
+        const ev = JSON.parse(line.slice(6))
+        if (ev.type === 'stage') onStage()
+        if (ev.type === 'synthesis') synthesis = ev.text || ev.content || synthesis
+      } catch { /* partial */ }
     }
   }
+  return synthesis
+}
 
-  const save = async () => {
-    if (!activePath) return
-    await fetch(`${API}/api/sandbox/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: activePath, content }),
-    })
-    setDirty(false)
-    // push a history snapshot (drop any redo tail)
-    history.current = history.current.slice(0, histIdx.current + 1)
-    history.current.push(content); histIdx.current = history.current.length - 1
-    refreshTree()
-  }
+// ── the studio ────────────────────────────────────────────────────────────────
+function CodeStudio({ onClose }: { onClose: () => void }) {
+  const [prompt, setPrompt] = useState('')
+  const [building, setBuilding] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [html, setHtml] = useState<string>('')
+  const [showCode, setShowCode] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const ac = useRef<AbortController | null>(null)
 
-  const undo = () => { if (histIdx.current > 0) { histIdx.current--; setContent(history.current[histIdx.current]); setDirty(true) } }
-  const redo = () => { if (histIdx.current < history.current.length - 1) { histIdx.current++; setContent(history.current[histIdx.current]); setDirty(true) } }
-
-  const newFile = async () => {
-    const name = prompt('New file (relative to sandbox):')
-    if (!name) return
-    await fetch(`${API}/api/sandbox/write`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: name, content: '' }),
-    })
-    await refreshTree(); open(name)
-  }
-
-  const run = async () => {
-    if (!activePath) return
-    setRunning(true); setOutput('running…')
-    if (dirty) await save()
-    const isPy = activePath.endsWith('.py')
-    const isJs = activePath.endsWith('.js') || activePath.endsWith('.mjs')
-    const cmd = isPy ? `python3 "${activePath}"` : isJs ? `node "${activePath}"` : `sh "${activePath}"`
+  const build = async () => {
+    const desc = prompt.trim()
+    if (!desc || building) return
+    setBuilding(true); setProgress(0.05); setError(null)
+    ac.current = new AbortController()
+    // Shape the request so the ensemble returns ONE renderable HTML document.
+    const message = html
+      ? `Here is the current web app:\n\`\`\`html\n${html}\n\`\`\`\nModify it to: ${desc}\n` +
+        `Return ONLY the complete updated standalone HTML document (inline CSS/JS), nothing else.`
+      : `Create a complete, standalone HTML document (inline <style> and <script>, no external files) that does this: ${desc}\n` +
+        `Make it look polished. Return ONLY the HTML document, nothing else.`
     try {
-      const r = await fetch(`${API}/api/sandbox/run`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd }),
-      }).then(r => r.json())
-      setOutput((r.output || '(no output)') + `\n\n— exit ${r.code} · ${r.ms}ms${r.timedOut ? ' · TIMED OUT' : ''}`)
-    } catch (e: any) { setOutput('error: ' + e.message) }
-    setRunning(false)
+      const out = await runEnsemble(message, () => setProgress(p => Math.min(0.9, p + 0.12)), ac.current.signal)
+      const doc = extractHtml(out)
+      if (!doc) throw new Error('no renderable output')
+      setHtml(doc); setProgress(1)
+      // persist into the sandbox so it survives + powers "peek at code"
+      fetch(`${API}/api/sandbox/write`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: 'studio/index.html', content: doc }),
+      }).catch(() => {})
+      setPrompt('')
+    } catch (e: any) {
+      if (e.name !== 'AbortError') setError(e.message || 'build failed')
+    }
+    setBuilding(false)
   }
 
-  const isHtml = activePath?.endsWith('.html')
-  const lines = content.split('\n')
-
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-      {/* file tree */}
-      <div style={{ width: 190, flexShrink: 0, borderRight: '1px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px' }}>
-          <span style={{ fontSize: 9, letterSpacing: '0.12em', color: '#666', fontWeight: 700 }}>SANDBOX</span>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={newFile} title="new file" style={iconBtn}>＋</button>
-            <button onClick={refreshTree} title="refresh" style={iconBtn}>↻</button>
-          </div>
-        </div>
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 4px 8px' }}>
-          {tree.length === 0
-            ? <div style={{ padding: 10, fontSize: 10.5, color: '#555', lineHeight: 1.6 }}>Empty sandbox. Click ＋ or ask the agent to build something.</div>
-            : <FileTree nodes={tree} active={activePath} onOpen={open} />}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', flexShrink: 0 }}>
+        <span style={{
+          width: 14, height: 14, borderRadius: 4,
+          background: 'linear-gradient(135deg, #7c7cf8, #4db89e, #c084fc, #f59e0b)',
+          backgroundSize: '200% 200%', animation: 'prism 3s linear infinite',
+        }} />
+        <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em', color: '#eaeaf4' }}>Crucible Code</span>
+        <div style={{ flex: 1 }} />
+        <button onClick={onClose} style={{
+          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#bbb',
+          borderRadius: 9, padding: '6px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+        }}>collab →</button>
+      </div>
+
+      {/* hero preview */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 32px' }}>
+        <div style={{
+          width: '100%', maxWidth: 880, height: '100%', maxHeight: 560,
+          borderRadius: 20, overflow: 'hidden', position: 'relative',
+          background: html ? '#fff' : 'rgba(255,255,255,0.02)',
+          border: '1px solid rgba(255,255,255,0.09)',
+          boxShadow: '0 24px 80px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05)',
+        }}>
+          {html ? (
+            <iframe title="preview" sandbox="allow-scripts" srcDoc={html} style={{ width: '100%', height: '100%', border: 'none' }} />
+          ) : (
+            <div style={{
+              position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 12, color: '#55556a', textAlign: 'center', padding: 24,
+            }}>
+              <div style={{ fontSize: 38, opacity: 0.5 }}>✦</div>
+              <div style={{ fontSize: 15, color: '#8a8a9e', fontWeight: 500 }}>Describe anything and watch it come to life.</div>
+              <div style={{ fontSize: 12.5, color: '#55556a', maxWidth: 360, lineHeight: 1.6 }}>
+                Try "a red bouncing ball", "a calculator", or "a starry night sky".
+              </div>
+            </div>
+          )}
+          {showCode && html && (
+            <pre style={{
+              position: 'absolute', inset: 0, margin: 0, padding: 16, overflow: 'auto',
+              background: 'rgba(8,8,14,0.97)', color: '#cdd0e0', fontFamily: 'ui-monospace, monospace',
+              fontSize: 11.5, lineHeight: 1.55, whiteSpace: 'pre-wrap',
+            }}>{html}</pre>
+          )}
         </div>
       </div>
 
-      {/* editor + output/preview */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
-        {/* toolbar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
-          <span style={{ fontSize: 11, color: '#bbb', fontFamily: 'ui-monospace, monospace', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {activePath ?? 'no file open'}{dirty ? ' •' : ''}
-          </span>
-          <button onClick={undo} disabled={histIdx.current <= 0} style={textBtn}>↶ undo</button>
-          <button onClick={redo} disabled={histIdx.current >= history.current.length - 1} style={textBtn}>↷ redo</button>
-          <button onClick={save} disabled={!activePath || !dirty} style={textBtn}>save</button>
-          {isHtml && <button onClick={() => setShowPreview(p => !p)} style={{ ...textBtn, color: showPreview ? '#7c7cf8' : '#888' }}>preview</button>}
-          <button onClick={run} disabled={!activePath || running} style={{ ...textBtn, color: '#4ade80', borderColor: 'rgba(74,222,128,0.3)' }}>▸ run</button>
-        </div>
-
-        {/* split: editor | (output or preview) */}
-        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-          {/* editor */}
-          <div style={{ width: `${editorW * 100}%`, display: 'flex', minHeight: 0, position: 'relative', background: 'rgba(0,0,0,0.25)' }}>
-            <div aria-hidden style={{
-              padding: '8px 4px 8px 8px', textAlign: 'right', userSelect: 'none',
-              fontFamily: 'ui-monospace, monospace', fontSize: 12, lineHeight: '1.5em', color: '#3a3a48', overflow: 'hidden',
-            }}>
-              {lines.map((_, i) => <div key={i}>{i + 1}</div>)}
+      {/* building bar */}
+      <div style={{ height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 32px', flexShrink: 0 }}>
+        {building ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', maxWidth: 880 }}>
+            <span style={{ fontSize: 12, color: '#a8a8c4', whiteSpace: 'nowrap' }}>✨ building…</span>
+            <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+              <div style={{
+                height: '100%', width: `${progress * 100}%`, borderRadius: 2,
+                background: 'linear-gradient(90deg, #7c7cf8, #4db89e, #c084fc)', transition: 'width 0.5s ease',
+              }} />
             </div>
-            <textarea
-              value={content}
-              spellCheck={false}
-              onChange={e => { setContent(e.target.value); setDirty(true) }}
-              onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save() } }}
-              placeholder={activePath ? '' : 'Open a file from the sandbox to edit.'}
-              style={{
-                flex: 1, resize: 'none', border: 'none', outline: 'none', background: 'transparent',
-                color: '#dcdce8', fontFamily: 'ui-monospace, monospace', fontSize: 12, lineHeight: '1.5em',
-                padding: '8px 10px', whiteSpace: 'pre', overflowWrap: 'normal', userSelect: 'text',
-              }}
-            />
+            <button onClick={() => ac.current?.abort()} style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: 11 }}>stop</button>
           </div>
+        ) : error ? (
+          <span style={{ fontSize: 12, color: '#fca5a5' }}>⚠ {error}</span>
+        ) : html ? (
+          <button onClick={() => setShowCode(s => !s)} style={{
+            background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, letterSpacing: '0.04em',
+            color: showCode ? '#7c7cf8' : '#666',
+          }}>〔 {showCode ? 'hide code' : 'peek at code'} 〕</button>
+        ) : null}
+      </div>
 
-          {/* drag divider (JS-driven resize) */}
-          <div
-            onMouseDown={e => {
-              e.preventDefault()
-              const parent = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect()
-              const move = (ev: MouseEvent) => {
-                const frac = (ev.clientX - parent.left) / parent.width
-                setEditorW(Math.max(0.2, Math.min(0.8, frac)))
-              }
-              const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-              window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
+      {/* describe bar */}
+      <div style={{ padding: '12px 32px 28px', flexShrink: 0, display: 'flex', justifyContent: 'center' }}>
+        <div style={{
+          display: 'flex', alignItems: 'flex-end', gap: 8, width: '100%', maxWidth: 880,
+          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(124,124,248,0.2)',
+          borderRadius: 16, padding: '10px 10px 10px 18px',
+          boxShadow: '0 8px 30px rgba(0,0,0,0.3)',
+        }}>
+          <textarea
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); build() } }}
+            placeholder={html ? 'Describe a change… (e.g. "make it blue")' : 'Describe what you want to make…'}
+            rows={1}
+            style={{
+              flex: 1, resize: 'none', border: 'none', outline: 'none', background: 'transparent',
+              color: '#e8e8f0', fontSize: 14, lineHeight: 1.5, fontFamily: 'inherit', maxHeight: 120,
             }}
-            style={{ width: 5, cursor: 'col-resize', background: 'rgba(255,255,255,0.06)', flexShrink: 0 }}
           />
-
-          {/* output / preview */}
-          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            <div style={{ fontSize: 9, letterSpacing: '0.12em', color: '#666', fontWeight: 700, padding: '6px 10px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-              {showPreview && isHtml ? 'PREVIEW' : 'OUTPUT'}
-            </div>
-            {showPreview && isHtml ? (
-              <iframe title="preview" sandbox="allow-scripts" srcDoc={content} style={{ flex: 1, border: 'none', background: '#fff' }} />
-            ) : (
-              <pre style={{
-                flex: 1, margin: 0, padding: 10, overflow: 'auto', background: 'rgba(0,0,0,0.4)',
-                fontFamily: 'ui-monospace, monospace', fontSize: 11, lineHeight: 1.5, color: '#9fef9f', whiteSpace: 'pre-wrap',
-              }}>{output || (running ? 'running…' : '— run a file to see output —')}</pre>
-            )}
-          </div>
+          <button onClick={build} disabled={building || !prompt.trim()} style={{
+            width: 36, height: 36, borderRadius: '50%', border: 'none', flexShrink: 0,
+            background: prompt.trim() && !building ? 'linear-gradient(135deg, #7c7cf8, #4db89e)' : '#26263200',
+            cursor: prompt.trim() && !building ? 'pointer' : 'default',
+            color: '#fff', fontSize: 17, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            opacity: prompt.trim() && !building ? 1 : 0.4, transition: 'opacity 0.3s',
+          }}>▸</button>
         </div>
       </div>
     </div>
   )
 }
 
-// ── collab tab ────────────────────────────────────────────────────────────────
-function CollabTab() {
-  const provColor: Record<string, string> = {
-    groq: '#f59e0b', mistral: '#ff7000', openrouter: '#7c7cf8', gemini: '#4db89e', huggingface: '#facc15', cloudflare: '#f6821f',
-  }
-  return (
-    <div style={{ padding: '16px 20px', overflow: 'auto', height: '100%' }}>
-      <div style={{ fontSize: 11, color: '#888', lineHeight: 1.6, marginBottom: 16, maxWidth: 560 }}>
-        Crucible runs an adversarial ensemble: many models answer in parallel, a scoring engine
-        ranks them, they critique and revise, and the best is synthesized. Below is the full roster.
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
-        {MODEL_REGISTRY.map(m => {
-          const c = provColor[m.provider] ?? '#888'
-          return (
-            <div key={m.id} style={{
-              border: `1px solid ${c}33`, background: `${c}0d`, borderRadius: 10, padding: '10px 12px',
-              display: 'flex', flexDirection: 'column', gap: 4,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: c, flexShrink: 0 }} />
-                <span style={{ fontSize: 12.5, fontWeight: 600, color: '#e2e2ea' }}>{m.label}</span>
-              </div>
-              <div style={{ fontSize: 9.5, color: '#777', letterSpacing: '0.04em' }}>
-                {m.provider} · {m.params ?? '?'}B · {m.speed ?? 'standard'}
-              </div>
-              {m.fit?.coding != null && (
-                <div style={{ display: 'flex', gap: 2, marginTop: 2 }}>
-                  {Array.from({ length: 10 }, (_, i) => (
-                    <span key={i} style={{ flex: 1, height: 3, borderRadius: 1, background: i < (m.fit!.coding) ? c : 'rgba(255,255,255,0.07)' }} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// ── shared button styles ──────────────────────────────────────────────────────
-const iconBtn: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#999',
-  borderRadius: 5, width: 20, height: 20, cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 0,
-}
-const textBtn: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', color: '#aaa',
-  borderRadius: 6, padding: '3px 9px', cursor: 'pointer', fontSize: 10.5, fontWeight: 600, letterSpacing: '0.03em',
-}
-
-// ── the dock ──────────────────────────────────────────────────────────────────
+// ── the dock (pill + slide-in studio) ─────────────────────────────────────────
 export default function LeftDock() {
   const [open, setOpen] = useState(false)
-  const [tab, setTab] = useState<'collab' | 'code'>('code')
+  const [closing, setClosing] = useState(false)
   const pillRef = useRef<HTMLDivElement | null>(null)
   const opacity = useProximityOpacity(pillRef)
 
+  // collab → : slide the studio out to the right, then unmount
+  const close = () => { setClosing(true); setTimeout(() => { setOpen(false); setClosing(false) }, 360) }
+
   return (
     <>
-      {/* collapsed frosted pill — inline with the chat bar (bottom-left).
-          Proximity drives a prismatic glow that only ignites as the cursor nears. */}
       {!open && (
         <div
           ref={pillRef}
           onClick={() => setOpen(true)}
           style={{
-            position: 'fixed', left: 16, bottom: 22, zIndex: 30, cursor: 'pointer',
+            position: 'fixed', left: 16, bottom: 22, zIndex: 40, cursor: 'pointer',
             padding: '9px 16px 9px 11px', borderRadius: 14,
             background: `rgba(16,16,26,${0.3 + opacity * 0.45})`,
             backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
@@ -313,7 +241,6 @@ export default function LeftDock() {
             display: 'flex', alignItems: 'center', gap: 9,
           }}
         >
-          {/* prismatic orb that brightens with proximity */}
           <span style={{
             width: 16, height: 16, borderRadius: 5, flexShrink: 0,
             background: 'linear-gradient(135deg, #7c7cf8, #4db89e, #c084fc, #f59e0b)',
@@ -326,41 +253,19 @@ export default function LeftDock() {
           <span style={{
             fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' as const,
             color: `rgba(225,225,245,${0.5 + opacity * 0.5})`, transition: 'color 0.3s',
-          }}>
-            Code
-          </span>
+          }}>Code</span>
         </div>
       )}
 
-      {/* expanded panel */}
       {open && (
         <div style={{
-          position: 'fixed', left: 14, bottom: 22, top: 64, zIndex: 30,
-          width: 'min(62vw, 860px)',
-          display: 'flex', flexDirection: 'column',
-          borderRadius: 16, overflow: 'hidden',
-          background: 'rgba(14,14,22,0.92)', backdropFilter: 'blur(26px)', WebkitBackdropFilter: 'blur(26px)',
-          border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 20px 70px rgba(0,0,0,0.6)',
-          animation: 'panelUp 0.32s cubic-bezier(0.34,1.2,0.64,1)',
+          position: 'fixed', inset: 0, zIndex: 40,
+          background: 'rgba(13,13,20,0.96)', backdropFilter: 'blur(30px)', WebkitBackdropFilter: 'blur(30px)',
+          transform: closing ? 'translateX(100%)' : 'translateX(0)',
+          animation: closing ? 'none' : 'studioIn 0.42s cubic-bezier(0.16,1,0.3,1)',
+          transition: 'transform 0.36s cubic-bezier(0.5,0,0.75,0)',
         }}>
-          {/* tab header */}
-          <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingRight: 8 }}>
-            {(['code', 'collab'] as const).map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '13px 20px', fontSize: 12, fontWeight: 600, letterSpacing: '0.03em',
-                color: tab === t ? '#e8e8f4' : '#666',
-                borderBottom: `2px solid ${tab === t ? '#7c7cf8' : 'transparent'}`,
-                textTransform: 'lowercase',
-              }}>{t}</button>
-            ))}
-            <div style={{ flex: 1 }} />
-            <button onClick={() => setOpen(false)} style={{ ...iconBtn, width: 24, height: 24 }} title="collapse">×</button>
-          </div>
-          {/* tab body */}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            {tab === 'code' ? <CodeTab /> : <CollabTab />}
-          </div>
+          <CodeStudio onClose={close} />
         </div>
       )}
     </>
