@@ -250,7 +250,7 @@ intact; writes outside `projectPath` are blocked without confirm. Commit.
 | # | Section | Status | Last commit | Next step if interrupted |
 |---|---|---|---|---|
 | 1 | Tool protocol | ✅ | (this commit) | done — registry + dual-mode protocol, smoke test passes |
-| 2 | Agent loop | ☐ | | |
+| 2 | Agent loop | ✅ | (this commit) | done — loop on main /api/chat path, write+run verified |
 | 3 | Editing+shell | ☐ | | |
 | 4 | Verification | ☐ | | |
 | 5 | Planner | ☐ | | |

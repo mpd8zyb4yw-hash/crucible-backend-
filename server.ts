@@ -15,8 +15,10 @@ import { createServer } from 'http'
 import { buildIndex, queryIndex, getIndexStats } from './src/CrucibleEngine/rag-context'
 import { createCheckpoint, rollbackToCheckpoint, getCheckpoints } from './src/CrucibleEngine/checkpoint'
 import { registry } from './src/CrucibleEngine/tools/registry'
-import { fenceProtocolPrompt, parseFenceToolCall } from './src/CrucibleEngine/tools/protocol'
+import { fenceProtocolPrompt, parseFenceToolCall, toOpenAITools, fromOpenAIToolCalls } from './src/CrucibleEngine/tools/protocol'
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
+import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
+import type { DriveTurn } from './src/CrucibleEngine/agent/loop'
 
 const CIRCUIT_STATE_FILE = path.join(process.cwd(), '.circuit-state.json')
 
@@ -359,9 +361,63 @@ app.post('/api/prewarm', async (req, res) => {
   res.json({ ok: true, modelIds })
 })
 
+// ── Agent driver (section 2; section 6 adds tiered selection) ────────────────
+const DRIVER_MODEL = 'llama-3.3-70b-versatile'
+
+const nativeDriveTurn: DriveTurn = async (messages, tools, _signal) => {
+  recordProviderCall('groq')
+  const res = await groq.chat.completions.create({
+    model: DRIVER_MODEL,
+    messages: messages as any,
+    tools: toOpenAITools(tools) as any,
+    tool_choice: 'auto',
+    temperature: 0.2,
+  } as any)
+  const msg = res.choices[0]?.message
+  return { text: stripThink(msg?.content ?? ''), toolCalls: fromOpenAIToolCalls(msg) }
+}
+
+/** Imperative coding request that wants actions, not just an answer. */
+function detectAgentTask(message: string): boolean {
+  return /\b(create|write|build|make|add|implement|fix|refactor|update|generate|run|execute|test)\b/i.test(message) &&
+    /\b(file|script|code|function|test|program|app|project|directory|folder)\b/i.test(message)
+}
+
 app.post('/api/chat', async (req, res) => {
   const { message, mode = 'quorum', prewarmToken } = req.body
   console.log('[/api/chat] Received:', message?.slice(0, 80))
+
+  // ── Agent mode — sustained tool loop instead of the synthesis pipeline ─────
+  if (mode === 'agent' || (req.body.agentMode !== false && detectAgentTask(message ?? ''))) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    const send = (payload: object) => res.write(`data: ${JSON.stringify(payload)}\n\n`)
+
+    const projectPath = req.body.projectPath
+      ? path.resolve(req.body.projectPath)
+      : path.join(process.cwd(), '.crucible', 'workspace')
+    fs.mkdirSync(projectPath, { recursive: true })
+
+    const ac = new AbortController()
+    // res 'close' fires on client disconnect; req 'close' fires once the body is
+    // consumed in Express 5, which would falsely cancel the loop.
+    res.on('close', () => ac.abort())
+
+    send({ type: 'agent_start', driver: DRIVER_MODEL, projectPath })
+    console.log(`[Agent] Starting loop — driver: ${DRIVER_MODEL}, project: ${projectPath}`)
+    const result = await runAgentLoop({
+      goal: message,
+      projectPath,
+      driveTurn: nativeDriveTurn,
+      emit: send,
+      signal: ac.signal,
+    })
+    if (result.finalText) send({ type: 'final', text: result.finalText })
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
 
   // ── Consume prewarm if available ─────────────────────────────────────────
   // Store all prewarm results keyed by modelId for fast lookup at Stage 1

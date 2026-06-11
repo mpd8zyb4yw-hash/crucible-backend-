@@ -3,6 +3,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { spawn } from 'child_process'
 import type { ToolCall, ToolCtx, ToolDef, ToolResult } from './protocol'
 
 const tools = new Map<string, ToolDef>()
@@ -84,6 +85,64 @@ registry.register({
     const numbered = slice.map((l, i) => `${offset + i}\t${l}`).join('\n')
     const { output, truncated } = capOutput(numbered)
     return { ok: true, output, truncated: truncated || offset - 1 + limit < lines.length, meta: { totalLines: lines.length } }
+  },
+})
+
+registry.register({
+  name: 'write_file',
+  description: 'Create or overwrite a file with the given content. Parent dirs are created.',
+  params: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'File path (relative to project root or absolute within it)' },
+      content: { type: 'string', description: 'Full file content' },
+    },
+    required: ['path', 'content'],
+  },
+  mutates: true,
+  async run(args, ctx) {
+    const abs = resolveSafe(String(args.path ?? ''), ctx)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, String(args.content ?? ''), 'utf-8')
+    return { ok: true, output: `Wrote ${String(args.content ?? '').length} chars to ${abs}` }
+  },
+})
+
+registry.register({
+  name: 'run',
+  description: 'Run a shell command in the project root. Returns stdout/stderr and exit code. 30s timeout.',
+  params: {
+    type: 'object',
+    properties: {
+      command: { type: 'string', description: 'Shell command to execute' },
+      timeoutMs: { type: 'number', description: 'Timeout in ms (max 120000)' },
+    },
+    required: ['command'],
+  },
+  mutates: true,
+  async run(args, ctx) {
+    const command = String(args.command ?? '')
+    const timeoutMs = Math.min(Number(args.timeoutMs ?? 30_000), 120_000)
+    return new Promise<ToolResult>(resolve => {
+      const child = spawn('/bin/zsh', ['-c', command], { cwd: ctx.projectPath, env: process.env })
+      let out = ''
+      const cap = (s: string) => { if (out.length < 100_000) out += s }
+      child.stdout.on('data', d => cap(d.toString()))
+      child.stderr.on('data', d => cap(d.toString()))
+      const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[killed: ${timeoutMs}ms timeout]` }, timeoutMs)
+      const onAbort = () => { child.kill('SIGKILL'); out += '\n[killed: cancelled]' }
+      ctx.signal?.addEventListener('abort', onAbort, { once: true })
+      child.on('close', code => {
+        clearTimeout(timer)
+        ctx.signal?.removeEventListener('abort', onAbort)
+        const { output, truncated } = capOutput(out)
+        resolve({ ok: code === 0, output: `exit ${code}\n${output}`, truncated, meta: { exitCode: code } })
+      })
+      child.on('error', e => {
+        clearTimeout(timer)
+        resolve({ ok: false, output: `spawn failed: ${e.message}` })
+      })
+    })
   },
 })
 
