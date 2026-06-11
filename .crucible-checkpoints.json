@@ -130,5 +130,17 @@
     "message": "pre-write_file",
     "timestamp": 1781211724671,
     "projectPath": "/var/folders/r1/r058ry_x197cx6p231lk7p700000gn/T/crucible-sess-ygpLg4"
+  },
+  {
+    "hash": "b40e7b7",
+    "message": "pre-write_file",
+    "timestamp": 1781211797249,
+    "projectPath": "/Users/justin/crucible-local/.crucible/workspace"
+  },
+  {
+    "hash": "132b843",
+    "message": "pre-write_file",
+    "timestamp": 1781213524645,
+    "projectPath": "/Users/justin/crucible-local/.crucible/workspace"
   }
 ]

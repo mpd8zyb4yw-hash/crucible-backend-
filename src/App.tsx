@@ -136,10 +136,37 @@ function assignColors(models: Omit<DynamicModel, 'color' | 'rgb'>[]): DynamicMod
   }))
 }
 
+// Robust clipboard copy — Electron/file:// contexts often lack navigator.clipboard,
+// so fall back to the legacy textarea+execCommand path.
+function copyText(text: string) {
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch { /* noop */ }
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(fallback)
+    } else {
+      fallback()
+    }
+  } catch {
+    fallback()
+  }
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
-  const copy = () => {
-    navigator.clipboard.writeText(text)
+  const copy = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    copyText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
@@ -589,7 +616,7 @@ const TOOL_GLYPH: Record<string, string> = {
 function DiffBlock({ d }: { d: AgentDiff }) {
   const rel = d.path.split('/').slice(-2).join('/')
   return (
-    <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10.5, lineHeight: 1.5, marginTop: 4 }}>
+    <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 10.5, lineHeight: 1.5, marginTop: 4, maxHeight: 200, overflowY: 'auto', overflowX: 'hidden' }}>
       <div style={{ color: '#888', marginBottom: 2 }}>{rel}</div>
       {d.patch ? (
         <pre style={{ margin: 0, whiteSpace: 'pre-wrap' as const }}>
@@ -672,7 +699,13 @@ function AgentPanel({ agent }: { agent: AgentState }) {
       {agent.tools.length > 0 && (
         <div>
           <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>tools · {agent.tools.length}</div>
-          {agent.tools.map((t, i) => <ToolRow key={`${t.id}:${i}`} t={t} />)}
+          <div style={{
+            maxHeight: 180, overflowY: 'auto', overflowX: 'hidden',
+            background: 'rgba(0,0,0,0.5)', borderRadius: 6,
+            border: '1px solid rgba(255,255,255,0.06)', padding: '8px 14px 8px 8px',
+          }}>
+            {agent.tools.map((t, i) => <ToolRow key={`${t.id}:${i}`} t={t} />)}
+          </div>
         </div>
       )}
 
@@ -680,7 +713,9 @@ function AgentPanel({ agent }: { agent: AgentState }) {
       {agent.diffs.length > 0 && (
         <div>
           <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>changes · {agent.diffs.length}</div>
-          {agent.diffs.slice(-4).map((d, i) => <DiffBlock key={i} d={d} />)}
+          <div style={{ maxHeight: 280, overflowY: 'auto', overflowX: 'hidden', paddingRight: 2 }}>
+            {agent.diffs.slice(-4).map((d, i) => <DiffBlock key={i} d={d} />)}
+          </div>
         </div>
       )}
 
@@ -688,11 +723,14 @@ function AgentPanel({ agent }: { agent: AgentState }) {
       {agent.terminal.length > 0 && (
         <div>
           <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const, marginBottom: 4 }}>terminal</div>
-          <pre style={{
-            margin: 0, padding: 8, background: 'rgba(0,0,0,0.5)', borderRadius: 6,
-            fontSize: 10, lineHeight: 1.5, color: '#9fef9f', fontFamily: 'ui-monospace, monospace',
-            whiteSpace: 'pre-wrap' as const, maxHeight: 180, overflow: 'auto',
-          }}>{agent.terminal.slice(-3).join('\n')}</pre>
+          <div style={{ position: 'relative' }}>
+            <CopyButton text={agent.terminal.join('\n')} />
+            <pre style={{
+              margin: 0, padding: 8, background: 'rgba(0,0,0,0.5)', borderRadius: 6,
+              fontSize: 10, lineHeight: 1.5, color: '#9fef9f', fontFamily: 'ui-monospace, monospace',
+              whiteSpace: 'pre-wrap' as const, maxHeight: 180, overflow: 'auto',
+            }}>{agent.terminal.slice(-3).join('\n')}</pre>
+          </div>
         </div>
       )}
 
@@ -756,7 +794,7 @@ export default function App() {
         const last = rounds[rounds.length - 1]
         if (last) {
           const text = Object.values(last.responses).filter(Boolean).join('\n\n')
-          navigator.clipboard.writeText(text)
+          copyText(text)
         }
       }
     }
@@ -1749,17 +1787,17 @@ export default function App() {
                 {/* Outer prismatic rounded square */}
                 <div style={{
                   position: 'absolute',
-                  width: 13, height: 13,
+                  width: 12, height: 12,
                   borderRadius: 4,
                   background: 'linear-gradient(135deg, #7c7cf8, #4db89e, #c084fc, #f59e0b, #7c7cf8)',
                   backgroundSize: '300% 300%',
                   animation: 'prism 1.4s linear infinite, arrowToRing 0.5s cubic-bezier(0.4,0,0.2,1) forwards',
                 }} />
-                {/* Inner black square cutout — creates ring effect */}
+                {/* Inner black square cutout — creates ring effect (thinner wall) */}
                 <div style={{
                   position: 'absolute',
-                  width: 7, height: 7,
-                  borderRadius: 2,
+                  width: 9, height: 9,
+                  borderRadius: 2.5,
                   background: '#000',
                   zIndex: 1,
                 }} />
@@ -1768,7 +1806,7 @@ export default function App() {
             {/* Arrow — only shown when not thinking */}
             {!thinking && (
               <span style={{
-                fontSize: 14, fontWeight: 700, lineHeight: 1, marginTop: -1,
+                fontSize: 16, fontWeight: 700, lineHeight: 1, marginTop: -1,
                 color: '#fff',
               }}>↑</span>
             )}
