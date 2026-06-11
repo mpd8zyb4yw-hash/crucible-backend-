@@ -1664,79 +1664,63 @@ export default function App() {
         )
       })()}
 
-     {/* ── Model status bar ── */}
-      <div style={{ display: 'flex', justifyContent: 'center', padding: '10px 20px 12px', zIndex: 21, position: 'relative' }}>
-        <div style={{
-          position: 'relative', display: 'inline-flex', gap: 4, flexWrap: 'wrap' as const,
-          padding: '8px 10px', borderRadius: 14,
-          width: '100%', maxWidth: 680, justifyContent: 'center', overflow: 'hidden',
-          background: 'transparent',
-          boxShadow: thinking
-            ? `0 0 24px rgba(124,124,248,0.15), inset 0 1px 0 rgba(255,255,255,0.06)`
-            : globalDone
-            ? `0 0 16px rgba(124,124,248,0.08), inset 0 1px 0 rgba(255,255,255,0.04)`
-            : 'inset 0 1px 0 rgba(255,255,255,0.04)',
-          border: thinking
-            ? '1px solid rgba(124,124,248,0.18)'
-            : globalDone
-            ? '1px solid rgba(124,124,248,0.08)'
-            : '1px solid rgba(255,255,255,0.05)',
-          transition: 'box-shadow 0.6s ease',
-        }}>
-          {activeModels.length === 0 ? null : activeModels.map(model => {
-            const isDone       = latestRound ? latestRound.done[model.id] : false
-            const pipelineDone = latestRound ? latestRound.synthesisDone : false
-            const isActive     = thinking && !pipelineDone
-            return (
-              <div key={model.id} style={{
-                position: 'relative', display: 'flex', alignItems: 'center', gap: 7,
-                padding: '6px 16px', borderRadius: 10, flex: 1, justifyContent: 'center',
-                background: isDone ? `rgba(${model.rgb},0.06)` : 'transparent',
-                border: `1px solid ${isDone ? `rgba(${model.rgb},0.18)` : 'transparent'}`,
-                transition: 'all 0.3s',
-              }}>
-                <span style={{
-                  width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                  background: isDone ? model.color : isActive ? model.color : '#252530',
-                  boxShadow: isActive ? `0 0 10px ${model.color}, 0 0 20px rgba(${model.rgb},0.4)` : isDone ? `0 0 6px rgba(${model.rgb},0.5)` : 'none',
-                  animation: isActive ? 'dotpulse 1.2s ease-in-out infinite' : 'none',
-                  transition: 'all 0.3s',
-                }} />
-                <span style={{
-                  fontSize: 11, fontWeight: 600, letterSpacing: '0.04em', whiteSpace: 'nowrap' as const,
-                  color: isDone ? model.color : isActive ? `rgba(${model.rgb},0.7)` : '#2a2a38',
-                  transition: 'color 0.3s',
-                }}>
-                  {model.label}
-                  {model.isWildcard && <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 3 }}>✦</span>}
-                </span>
-                {latestRound?.stage2Done && latestRound?.avgScores[model.id] !== undefined && (
-                  <span style={{
-                    fontSize: 9, fontWeight: 700,
-                    color: latestRound.avgScores[model.id] >= 0.70 ? '#4db89e' : latestRound.avgScores[model.id] >= 0.50 ? '#c084fc' : '#f87171',
-                  }}>
-                    {(latestRound.avgScores[model.id] * 100).toFixed(0) + '%'}
-                  </span>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* ── Idle parameter count ── */}
-      {!thinking && activeModels.length === 0 && (
-        <div style={{
-          textAlign: 'center', fontSize: 9, color: 'rgba(255,255,255,0.12)',
-          fontFamily: 'monospace', letterSpacing: '0.06em', marginTop: 4,
-          userSelect: 'none',
-        }}>
-          {MODEL_REGISTRY.reduce((s, m) => s + (m.params ?? 0), 0)}B parameters across {MODEL_REGISTRY.length} models
-        </div>
-      )}
-
       {/* ── Input bar ── */}
       <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, padding: '8px 12px 18px', zIndex: 10, display: 'flex', flexDirection: 'column', alignItems: 'center', background: 'rgba(22,22,30,0.7)' }}>
+        {/* ── Active-model cards — above the chat bar, dynamic width ── */}
+        {activeModels.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, width: '100%', maxWidth: 680, marginBottom: 8 }}>
+            {activeModels.map(model => {
+              const isDone       = latestRound ? latestRound.done[model.id] : false
+              const pipelineDone = latestRound ? latestRound.synthesisDone : false
+              const isActive     = thinking && !pipelineDone
+              const score        = latestRound?.stage2Done ? latestRound.avgScores[model.id] : undefined
+              const many         = activeModels.length >= 4
+              return (
+                <div key={model.id} style={{
+                  flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' as const, gap: 5,
+                  padding: many ? '8px 8px' : '10px 12px', borderRadius: 12,
+                  background: isActive ? `rgba(${model.rgb},0.10)` : isDone ? `rgba(${model.rgb},0.07)` : 'rgba(255,255,255,0.03)',
+                  border: `1px solid ${isActive ? `rgba(${model.rgb},0.45)` : isDone ? `rgba(${model.rgb},0.22)` : 'rgba(255,255,255,0.06)'}`,
+                  boxShadow: isActive ? `0 0 18px rgba(${model.rgb},0.18)` : 'none',
+                  backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+                  transition: 'all 0.35s ease',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+                    <span style={{
+                      width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                      background: isDone || isActive ? model.color : '#2a2a38',
+                      boxShadow: isActive ? `0 0 10px ${model.color}, 0 0 18px rgba(${model.rgb},0.5)` : isDone ? `0 0 6px rgba(${model.rgb},0.5)` : 'none',
+                      animation: isActive ? 'dotpulse 1.2s ease-in-out infinite' : 'none',
+                      transition: 'all 0.3s',
+                    }} />
+                    <span style={{
+                      fontSize: many ? 10.5 : 12, fontWeight: 600, letterSpacing: '0.02em',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, flex: 1,
+                      color: isDone ? model.color : isActive ? '#e2e2ea' : '#5a5a6e', transition: 'color 0.3s',
+                    }}>
+                      {model.label}{model.isWildcard && <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 3 }}>✦</span>}
+                    </span>
+                    {score !== undefined && (
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, flexShrink: 0,
+                        color: score >= 0.70 ? '#4db89e' : score >= 0.50 ? '#c084fc' : '#f87171',
+                      }}>{(score * 100).toFixed(0)}%</span>
+                    )}
+                  </div>
+                  {/* status sliver */}
+                  <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
+                    <div style={{
+                      height: '100%', borderRadius: 2,
+                      width: isDone ? '100%' : isActive ? '60%' : '0%',
+                      background: model.color, opacity: isDone ? 0.8 : 0.5,
+                      transition: 'width 0.6s ease', animation: isActive ? 'fadeIn 0.8s ease-in-out infinite alternate' : 'none',
+                    }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
         <div style={{
           display: 'flex', gap: 8, alignItems: 'flex-end',
           background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)',

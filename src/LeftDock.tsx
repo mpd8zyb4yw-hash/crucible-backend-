@@ -295,28 +295,39 @@ export default function LeftDock() {
 
   return (
     <>
-      {/* collapsed frosted pill — inline with the chat bar (bottom-left) */}
+      {/* collapsed frosted pill — inline with the chat bar (bottom-left).
+          Proximity drives a prismatic glow that only ignites as the cursor nears. */}
       {!open && (
         <div
           ref={pillRef}
           onClick={() => setOpen(true)}
           style={{
-            position: 'fixed', left: 14, bottom: 22, zIndex: 30, cursor: 'pointer',
-            padding: '10px 14px', borderRadius: 13,
-            background: `rgba(18,18,28,${0.22 + opacity * 0.5})`,
-            backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)',
-            border: `1px solid rgba(255,255,255,${0.04 + opacity * 0.14})`,
-            boxShadow: `0 4px 24px rgba(0,0,0,${opacity * 0.4})`,
-            opacity: 0.35 + opacity * 0.65,
-            transition: 'opacity 0.25s, background 0.25s, border 0.25s',
-            display: 'flex', alignItems: 'center', gap: 8,
+            position: 'fixed', left: 16, bottom: 22, zIndex: 30, cursor: 'pointer',
+            padding: '9px 16px 9px 11px', borderRadius: 14,
+            background: `rgba(16,16,26,${0.3 + opacity * 0.45})`,
+            backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
+            border: `1px solid rgba(140,140,248,${0.06 + opacity * 0.4})`,
+            boxShadow: `0 6px 26px rgba(0,0,0,0.35), 0 0 ${opacity * 28}px rgba(124,124,248,${opacity * 0.55})`,
+            opacity: 0.4 + opacity * 0.6,
+            transition: 'opacity 0.3s, background 0.3s, border 0.3s, box-shadow 0.3s',
+            display: 'flex', alignItems: 'center', gap: 9,
           }}
         >
-          <span style={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-            {[0, 1, 2].map(i => <span key={i} style={{ width: 13, height: 1.5, borderRadius: 2, background: `rgba(200,200,248,${0.4 + opacity * 0.5})` }} />)}
-          </span>
-          <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: '0.04em', color: `rgba(220,220,240,${0.45 + opacity * 0.5})` }}>
-            workspace
+          {/* prismatic orb that brightens with proximity */}
+          <span style={{
+            width: 16, height: 16, borderRadius: 5, flexShrink: 0,
+            background: 'linear-gradient(135deg, #7c7cf8, #4db89e, #c084fc, #f59e0b)',
+            backgroundSize: '200% 200%',
+            filter: `saturate(${0.4 + opacity * 1.1}) brightness(${0.7 + opacity * 0.6})`,
+            boxShadow: `0 0 ${opacity * 14}px rgba(124,124,248,${opacity * 0.8})`,
+            animation: opacity > 0.5 ? 'prism 2.4s linear infinite' : 'none',
+            transition: 'filter 0.3s, box-shadow 0.3s',
+          }} />
+          <span style={{
+            fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' as const,
+            color: `rgba(225,225,245,${0.5 + opacity * 0.5})`, transition: 'color 0.3s',
+          }}>
+            Code
           </span>
         </div>
       )}
