@@ -249,7 +249,7 @@ intact; writes outside `projectPath` are blocked without confirm. Commit.
 ## PROGRESS (update every commit)
 | # | Section | Status | Last commit | Next step if interrupted |
 |---|---|---|---|---|
-| 1 | Tool protocol | ☐ | | |
+| 1 | Tool protocol | ✅ | (this commit) | done — registry + dual-mode protocol, smoke test passes |
 | 2 | Agent loop | ☐ | | |
 | 3 | Editing+shell | ☐ | | |
 | 4 | Verification | ☐ | | |

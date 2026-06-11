@@ -14,6 +14,9 @@ import type { SelectedModel } from './modelRegistry'
 import { createServer } from 'http'
 import { buildIndex, queryIndex, getIndexStats } from './src/CrucibleEngine/rag-context'
 import { createCheckpoint, rollbackToCheckpoint, getCheckpoints } from './src/CrucibleEngine/checkpoint'
+import { registry } from './src/CrucibleEngine/tools/registry'
+import { fenceProtocolPrompt, parseFenceToolCall } from './src/CrucibleEngine/tools/protocol'
+import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 
 const CIRCUIT_STATE_FILE = path.join(process.cwd(), '.circuit-state.json')
 
@@ -124,55 +127,21 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 // ── Unified model caller ──────────────────────────────────────────────────────
-// ── Agentic tool-call loop ────────────────────────────────────────────────────
-const TOOL_SYSTEM_ADDON = `
-You have access to file tools. To read a file, output EXACTLY:
-<tool>read_file</tool><path>/absolute/path/to/file</path>
-
-To list a directory:
-<tool>list_dir</tool><path>/absolute/path/to/dir</path>
-
-Use these tools when you need to see code before answering. After receiving file contents, continue your response normally. Only use tools when necessary.`
-
-function extractToolCall(text: string): { tool: string; path: string } | null {
-  const match = text.match(/<tool>(read_file|list_dir)<\/tool><path>(.+?)<\/path>/)
-  if (!match) return null
-  return { tool: match[1], path: match[2].trim() }
-}
-
-async function executeToolCall(tool: string, filePath: string): Promise<string> {
-  try {
-    if (tool === 'read_file') {
-      if (!fs.existsSync(filePath)) return `[Error: File not found: ${filePath}]`
-      const content = fs.readFileSync(filePath, 'utf-8')
-      return `[File: ${filePath}]\n${content.slice(0, 3000)}`
-    }
-    if (tool === 'list_dir') {
-      if (!fs.existsSync(filePath)) return `[Error: Directory not found: ${filePath}]`
-      const entries = fs.readdirSync(filePath, { withFileTypes: true })
-      return `[Directory: ${filePath}]\n` + entries.map(e => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`).join('\n')
-    }
-    return '[Error: Unknown tool]'
-  } catch (e: any) {
-    return `[Error: ${e.message}]`
-  }
-}
-
+// ── Agentic tool-call loop (fence protocol via tool registry) ────────────────
 async function callModelAgentic(model: SelectedModel, messages: { role: string; content: string }[], maxIterations = 3): Promise<string> {
+  const ctx: ToolCtx = { projectPath: process.cwd(), allowMutation: false }
   const agenticMessages = [...messages]
-  // Inject tool instructions into system message
   if (agenticMessages[0]?.role === 'system') {
-    agenticMessages[0] = { ...agenticMessages[0], content: agenticMessages[0].content + TOOL_SYSTEM_ADDON }
+    agenticMessages[0] = { ...agenticMessages[0], content: agenticMessages[0].content + fenceProtocolPrompt(registry.list()) }
   }
   for (let i = 0; i < maxIterations; i++) {
     const response = await callModel(model, agenticMessages)
-    const toolCall = extractToolCall(response)
+    const toolCall = parseFenceToolCall(response)
     if (!toolCall) return response  // no tool call — final response
-    console.log(`[Agentic] Tool call: ${toolCall.tool}(${toolCall.path})`)
-    const toolResult = await executeToolCall(toolCall.tool, toolCall.path)
-    // Add model response and tool result to history
+    console.log(`[Agentic] Tool call: ${toolCall.name}(${JSON.stringify(toolCall.args)})`)
+    const result = await registry.exec(toolCall, ctx)
     agenticMessages.push({ role: 'assistant', content: response })
-    agenticMessages.push({ role: 'user', content: `Tool result:\n${toolResult}\n\nContinue your response.` })
+    agenticMessages.push({ role: 'user', content: `Tool result (${result.ok ? 'ok' : 'error'}):\n${result.output}\n\nContinue your response.` })
   }
   // Max iterations hit — call once more for final answer
   return await callModel(model, agenticMessages)
