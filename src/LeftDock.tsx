@@ -78,51 +78,99 @@ function CodeStudio({ onClose }: { onClose: () => void }) {
   const [html, setHtml] = useState<string>('')
   const [showCode, setShowCode] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [steps, setSteps] = useState<string[]>([])
+  const [copied, setCopied] = useState(false)
   const ac = useRef<AbortController | null>(null)
+
+  // The status phrase tracks progress, so the bar never feels frozen.
+  const statusText = steps.length
+    ? steps[Math.min(steps.length - 1, Math.floor(progress * steps.length))]
+    : 'building…'
+
+  // Capability brief shared by first-build and refine — this is what gives it teeth.
+  const POWER = `Make it genuinely impressive and detailed — NEVER a placeholder, blank frame, ` +
+    `empty box, or "todo" stub. The live preview has full internet, so if the idea references a ` +
+    `real artwork, person, place, or thing, LOAD REAL IMAGERY from public URLs ` +
+    `(e.g. https://upload.wikimedia.org/..., https://images.unsplash.com/..., https://picsum.photos/...). ` +
+    `Use advanced techniques freely: SVG, <canvas>, WebGL, CSS animations/filters/gradients, ` +
+    `requestAnimationFrame. For "animated" requests add real, continuous motion. Fill the viewport and ` +
+    `make it look professional.`
 
   const build = async () => {
     const desc = prompt.trim()
     if (!desc || building) return
-    setBuilding(true); setProgress(0.05); setError(null)
+    setBuilding(true); setProgress(0.04); setError(null); setSteps([])
+    setPrompt('')
     ac.current = new AbortController()
-    // Shape the request so the ensemble returns ONE renderable HTML document.
-    const message = html
-      ? `Here is the current web app:\n\`\`\`html\n${html}\n\`\`\`\nModify it to: ${desc}\n` +
-        `Return ONLY the complete updated standalone HTML document (inline CSS/JS), nothing else.`
-      : `Create a complete, standalone HTML document (inline <style> and <script>, no external files) that does this: ${desc}\n` +
-        `Make it look polished. Return ONLY the HTML document, nothing else.`
+    const signal = ac.current.signal
+
+    // 1) prompt-specific narration (fast, parallel with the heavy build)
+    fetch(`${API}/api/studio/plan`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ desc }), signal,
+    }).then(r => r.json()).then(d => setSteps(d.steps ?? [])).catch(() => {})
+
+    const genMsg = html
+      ? `Here is the current web app:\n\`\`\`html\n${html}\n\`\`\`\nModify it to: ${desc}\n${POWER}\n` +
+        `Return ONLY the complete updated standalone HTML document (inline CSS/JS).`
+      : `Create a complete, standalone HTML document (inline <style> and <script>, no build step) for: ${desc}\n${POWER}\n` +
+        `Return ONLY the HTML document, nothing else.`
     try {
-      const out = await runEnsemble(message, () => setProgress(p => Math.min(0.9, p + 0.12)), ac.current.signal)
-      const doc = extractHtml(out)
+      // 2) first build (ensemble — best quality draft)
+      const out = await runEnsemble(genMsg, () => setProgress(p => Math.min(0.7, p + 0.1)), signal)
+      let doc = extractHtml(out)
       if (!doc) throw new Error('no renderable output')
-      setHtml(doc); setProgress(1)
-      // persist into the sandbox so it survives + powers "peek at code"
-      fetch(`${API}/api/sandbox/write`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: 'studio/index.html', content: doc }),
-      }).catch(() => {})
-      setPrompt('')
+      setHtml(doc); setProgress(0.75)
+      persist(doc)
+
+      // 3) power pass — one refinement to eliminate placeholders / add real richness
+      setProgress(0.8)
+      try {
+        const refined = await runEnsemble(
+          `Here is a web app:\n\`\`\`html\n${doc}\n\`\`\`\nIt must be dramatically more detailed, realistic, ` +
+          `and alive. Remove ANY placeholder or empty area; add real imagery/animation the idea calls for. ${POWER}\n` +
+          `Return ONLY the improved complete HTML document.`,
+          () => setProgress(p => Math.min(0.97, p + 0.06)), signal,
+        )
+        const better = extractHtml(refined)
+        if (better && better.length > doc.length * 0.5) { doc = better; setHtml(doc); persist(doc) }
+      } catch (e: any) { if (e.name === 'AbortError') throw e /* keep first draft otherwise */ }
+
+      setProgress(1)
     } catch (e: any) {
       if (e.name !== 'AbortError') setError(e.message || 'build failed')
     }
     setBuilding(false)
   }
 
+  const persist = (doc: string) => fetch(`${API}/api/sandbox/write`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'studio/index.html', content: doc }),
+  }).catch(() => {})
+
+  const copyCode = () => {
+    const fb = () => { const ta = document.createElement('textarea'); ta.value = html; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy') } catch {} document.body.removeChild(ta) }
+    try { navigator.clipboard?.writeText ? navigator.clipboard.writeText(html).catch(fb) : fb() } catch { fb() }
+    setCopied(true); setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px', flexShrink: 0 }}>
+      {/* header — minimal, no branding shoved in your face */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '14px 20px', flexShrink: 0 }}>
         <span style={{
-          width: 14, height: 14, borderRadius: 4,
+          width: 11, height: 11, borderRadius: 3.5, opacity: 0.7,
           background: 'linear-gradient(135deg, #7c7cf8, #4db89e, #c084fc, #f59e0b)',
           backgroundSize: '200% 200%', animation: 'prism 3s linear infinite',
         }} />
-        <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: '-0.01em', color: '#eaeaf4' }}>Crucible Code</span>
         <div style={{ flex: 1 }} />
+        {/* collab → : a glass capsule with its own quiet personality (a soft teal aura) */}
         <button onClick={onClose} style={{
-          background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#bbb',
-          borderRadius: 9, padding: '6px 14px', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-        }}>collab →</button>
+          display: 'flex', alignItems: 'center', gap: 7,
+          background: 'rgba(77,184,158,0.10)', border: '1px solid rgba(77,184,158,0.3)', color: '#bfeede',
+          borderRadius: 11, padding: '7px 15px', cursor: 'pointer', fontSize: 12, fontWeight: 600, letterSpacing: '0.02em',
+          boxShadow: '0 0 18px rgba(77,184,158,0.12)',
+        }}>collab <span style={{ fontSize: 14, lineHeight: 1 }}>→</span></button>
       </div>
 
       {/* hero preview */}
@@ -149,11 +197,21 @@ function CodeStudio({ onClose }: { onClose: () => void }) {
             </div>
           )}
           {showCode && html && (
-            <pre style={{
-              position: 'absolute', inset: 0, margin: 0, padding: 16, overflow: 'auto',
-              background: 'rgba(8,8,14,0.97)', color: '#cdd0e0', fontFamily: 'ui-monospace, monospace',
-              fontSize: 11.5, lineHeight: 1.55, whiteSpace: 'pre-wrap',
-            }}>{html}</pre>
+            <>
+              <pre style={{
+                position: 'absolute', inset: 0, margin: 0, padding: 16, overflow: 'auto',
+                background: 'rgba(8,8,14,0.97)', color: '#cdd0e0', fontFamily: 'ui-monospace, monospace',
+                fontSize: 11.5, lineHeight: 1.55, whiteSpace: 'pre-wrap',
+              }}>{html}</pre>
+              <button onClick={copyCode} style={{
+                position: 'absolute', top: 12, right: 12,
+                background: copied ? 'rgba(77,184,158,0.2)' : 'rgba(255,255,255,0.08)',
+                border: `1px solid ${copied ? 'rgba(77,184,158,0.4)' : 'rgba(255,255,255,0.14)'}`,
+                borderRadius: 7, padding: '5px 11px', cursor: 'pointer',
+                fontSize: 10.5, fontWeight: 600, letterSpacing: '0.06em',
+                color: copied ? '#4db89e' : '#aaa', transition: 'all 0.2s',
+              }}>{copied ? 'copied' : 'copy'}</button>
+            </>
           )}
         </div>
       </div>
@@ -162,7 +220,9 @@ function CodeStudio({ onClose }: { onClose: () => void }) {
       <div style={{ height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 32px', flexShrink: 0 }}>
         {building ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', maxWidth: 880 }}>
-            <span style={{ fontSize: 12, color: '#a8a8c4', whiteSpace: 'nowrap' }}>✨ building…</span>
+            <span key={statusText} style={{ fontSize: 12, color: '#b6b6d0', whiteSpace: 'nowrap', minWidth: 130, animation: 'fadeIn 0.4s ease' }}>
+              ✨ {statusText}
+            </span>
             <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
               <div style={{
                 height: '100%', width: `${progress * 100}%`, borderRadius: 2,

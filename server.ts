@@ -1150,6 +1150,24 @@ app.post('/api/sandbox/run', (req, res) => {
   })
 })
 
+// Quick, prompt-specific build-step labels to narrate the Code Studio progress bar.
+// One fast driver call; degrades to generic phases if it fails.
+app.post('/api/studio/plan', async (req, res) => {
+  const desc = String(req.body?.desc || '').slice(0, 300)
+  const fallback = ['understanding your idea', 'sketching the structure', 'bringing it to life', 'polishing the details']
+  try {
+    const raw = await driverComplete([
+      { role: 'system', content: 'You narrate a build. Given what the user wants to make, output ONLY a JSON array of 4-5 short present-continuous phrases (2-4 words each, lowercase, no period) describing the build steps in order, specific to their idea. Example for "a bouncing ball": ["drawing the ball","setting up physics","adding the bounce","polishing the motion"]. JSON array only.' },
+      { role: 'user', content: desc },
+    ])
+    const arr = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] ?? '[]')
+    const steps = Array.isArray(arr) ? arr.filter((s: any) => typeof s === 'string').slice(0, 5) : []
+    res.json({ steps: steps.length ? steps : fallback })
+  } catch {
+    res.json({ steps: fallback })
+  }
+})
+
 // ── Checkpoint API ────────────────────────────────────────────────────────────
 app.post('/api/checkpoint', (req, res) => {
   const { projectPath, message } = req.body

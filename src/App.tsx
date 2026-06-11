@@ -1223,17 +1223,11 @@ export default function App() {
 
       {/* ── Top bar ── */}
       <div style={{
-        height: 48, display: 'flex', alignItems: 'center', padding: '0 16px 0 80px',
-        borderBottom: '1px solid rgba(255,255,255,0.055)',
-        background: 'rgba(9,9,11,0.88)', flexShrink: 0,
+        height: 40, display: 'flex', alignItems: 'center', padding: '0 16px 0 80px',
+        background: 'transparent', flexShrink: 0,
         justifyContent: 'space-between', zIndex: 10, position: 'relative',
-        backdropFilter: 'blur(16px)', WebkitAppRegion: 'drag',
+        WebkitAppRegion: 'drag',
       } as any}>
-        <span style={{
-          fontSize: 13, fontWeight: 600, letterSpacing: '-0.01em', color: '#e8e8e8',
-          position: 'absolute', left: '50%', transform: 'translateX(-50%)',
-          WebkitAppRegion: 'no-drag',
-        } as any}>Crucible</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', position: 'relative', WebkitAppRegion: 'no-drag' } as any}>
           {thinking && latestRound && (() => {
             const r = latestRound
