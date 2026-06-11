@@ -57,6 +57,8 @@ export function defaultSystemPreamble(projectPath: string): string {
   return `You are Crucible, an autonomous coding agent working in the project at ${projectPath}.
 Work step by step: inspect with tools, make changes, run code to verify, then give a final answer.
 Call tools when you need to act. When the task is fully done AND verified, reply with your final summary and no tool calls.
+
+IMPORTANT — delegation: for the single hardest algorithmic core of a task (a tricky function, non-obvious algorithm, or subtle edge-case logic), you MUST call ensemble_solve with a self-contained subprompt instead of writing it yourself. The ensemble runs several models in parallel and returns the highest-scored implementation, which is more reliable than your first draft. Then write that candidate to a file and verify it. Use ensemble_solve at most once or twice per task, only for the genuinely hard part — routine glue code you write directly.
 Paths may be relative to the project root. Keep outputs concise.`
 }
 
@@ -101,6 +103,8 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
       emit({ type: 'agent_error', error: String(e?.message ?? e), iter })
       return done('error', String(e?.message ?? e), iter)
     }
+    // Defend against a driver returning a partial turn.
+    turn = { text: turn?.text ?? '', toolCalls: Array.isArray(turn?.toolCalls) ? turn.toolCalls : [] }
     spend(turn.text.length + JSON.stringify(turn.toolCalls).length)
 
     if (turn.text.trim()) emit({ type: 'thought', text: turn.text, iter })

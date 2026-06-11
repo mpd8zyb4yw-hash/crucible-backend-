@@ -19,7 +19,7 @@ import { fenceProtocolPrompt, parseFenceToolCall, toOpenAITools, fromOpenAIToolC
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
 import { makeVerifier } from './src/CrucibleEngine/agent/verify'
-import { nativeDriveTurn, driverComplete, DRIVER_MODEL } from './src/CrucibleEngine/agent/driver'
+import { nativeDriveTurn, driverComplete, currentDriverLabel } from './src/CrucibleEngine/agent/driver'
 import { needsPlan, runPlannedTask } from './src/CrucibleEngine/agent/planner'
 
 const CIRCUIT_STATE_FILE = path.join(process.cwd(), '.circuit-state.json')
@@ -363,6 +363,52 @@ app.post('/api/prewarm', async (req, res) => {
   res.json({ ok: true, modelIds })
 })
 
+// ── ensemble_solve — the scoring pipeline as a worker tool for the driver ────
+// Crucible's differentiator: the driver can hand a hard, bounded sub-problem to
+// the parallel ensemble and get back the best contract-scored candidate.
+registry.register({
+  name: 'ensemble_solve',
+  description: 'Solve ONE hard, bounded sub-problem (a tricky function, algorithm, or test) by running multiple models in parallel and returning the highest-scored candidate. Use for the genuinely hard core of a task, not routine code.',
+  params: {
+    type: 'object',
+    properties: {
+      subprompt: { type: 'string', description: 'Self-contained description of the sub-problem, with any needed context inlined' },
+    },
+    required: ['subprompt'],
+  },
+  async run(args) {
+    const subprompt = String(args.subprompt ?? '')
+    if (!subprompt) return { ok: false, output: 'subprompt required' }
+    const t0 = Date.now()
+    const promptType = classifyPrompt(subprompt)
+    const { models } = selectModels(promptType, SIMPLE_PIPELINE_CONFIG, 'complex', 'quorum')
+    const contract = generateContract(subprompt, promptType)
+    const workers = models.slice(0, 3)
+    console.log(`[Ensemble] solve(${promptType}) via ${workers.map(m => m.label).join(', ')}`)
+    const candidates = await Promise.all(workers.map(m =>
+      withTimeout(callModel(m, [
+        { role: 'system', content: contract.systemPrompt },
+        { role: 'user', content: subprompt },
+      ]).catch(() => ''), 30_000, '')
+    ))
+    let best = ''; let bestScore = -1; let bestModel = ''
+    candidates.forEach((text, i) => {
+      if (!text) return
+      const r = evaluateIteration(
+        { proposedSource: text, problemStatement: subprompt, pipelineLayer: 1, promptType, contract },
+        DEFAULT_SCORING_CONFIG, 1,
+      )
+      if (r.score.compositeScore > bestScore) { bestScore = r.score.compositeScore; best = text; bestModel = workers[i].label }
+    })
+    if (!best) return { ok: false, output: 'All ensemble workers failed or timed out.' }
+    return {
+      ok: true,
+      output: best,
+      meta: { model: bestModel, score: Number(bestScore.toFixed(3)), ms: Date.now() - t0, candidates: candidates.filter(Boolean).length },
+    }
+  },
+})
+
 /** Imperative coding request that wants actions, not just an answer. */
 function detectAgentTask(message: string): boolean {
   return /\b(create|write|build|make|add|implement|fix|refactor|update|generate|run|execute|test)\b/i.test(message) &&
@@ -390,9 +436,9 @@ app.post('/api/chat', async (req, res) => {
     // consumed in Express 5, which would falsely cancel the loop.
     res.on('close', () => ac.abort())
 
-    send({ type: 'agent_start', driver: DRIVER_MODEL, projectPath })
-    console.log(`[Agent] Starting — driver: ${DRIVER_MODEL}, project: ${projectPath}, planned: ${needsPlan(message)}`)
-    recordProviderCall('groq')
+    const t0 = Date.now()
+    send({ type: 'agent_start', driver: currentDriverLabel(), projectPath })
+    console.log(`[Agent] Starting — driver: ${currentDriverLabel()}, project: ${projectPath}, planned: ${needsPlan(message)}`)
     if (needsPlan(message)) {
       const result = await runPlannedTask({
         goal: message,
@@ -416,6 +462,7 @@ app.post('/api/chat', async (req, res) => {
       })
       if (result.finalText) send({ type: 'final', text: result.finalText })
     }
+    console.log(`[Agent] End-to-end latency: ${((Date.now() - t0) / 1000).toFixed(1)}s`)
     res.write('data: [DONE]\n\n')
     res.end()
     return

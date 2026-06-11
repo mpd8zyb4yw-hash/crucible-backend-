@@ -254,6 +254,6 @@ intact; writes outside `projectPath` are blocked without confirm. Commit.
 | 3 | Editing+shell | ✅ | (this commit) | done — edit/patch/search/run, checkpoint gate, 11 tests pass |
 | 4 | Verification | ✅ | (this commit) | done — verify+self-heal, fingerprint anti-thrash, 8 tests pass |
 | 5 | Planner | ✅ | (this commit) | done — live todo plan/replan, 5-step task e2e (groq TPD hit at tail, honest stop) |
-| 6 | Model strategy | ☐ | | |
+| 6 | Model strategy | ✅ | (this commit) | done — driver tier + cross-provider fallback; ensemble_solve autonomously fired (edit_distance correct); latency logged (~220s planned path — optimize apply_patch churn later) |
 | 7 | Frontend | ☐ | | |
 | 8 | State/memory/safety | ☐ | | |

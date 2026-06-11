@@ -53,8 +53,11 @@ export const registry = {
 
 // ── Path safety ───────────────────────────────────────────────────────────────
 
-/** Resolve p against projectPath; throw if it escapes the project root. */
+/** Resolve p against projectPath; throw if it escapes the project root or is empty. */
 export function resolveSafe(p: string, ctx: ToolCtx, { allowOutside = false } = {}): string {
+  if (!p || typeof p !== 'string' || !p.trim()) {
+    throw new Error('A non-empty "path" argument is required.')
+  }
   const abs = path.isAbsolute(p) ? path.normalize(p) : path.resolve(ctx.projectPath, p)
   if (!allowOutside) {
     const root = path.resolve(ctx.projectPath) + path.sep
@@ -66,6 +69,13 @@ export function resolveSafe(p: string, ctx: ToolCtx, { allowOutside = false } = 
 }
 
 const MAX_OUTPUT_CHARS = 24_000
+
+/** Read a file for mutation tools, returning a clean error (never throwing EISDIR/ENOENT). */
+function readFileChecked(abs: string): { ok: true; content: string } | { ok: false; output: string } {
+  if (!fs.existsSync(abs)) return { ok: false, output: `File not found: ${abs}. Create it with write_file first.` }
+  if (fs.statSync(abs).isDirectory()) return { ok: false, output: `${abs} is a directory, not a file. Pass a file path.` }
+  return { ok: true, content: fs.readFileSync(abs, 'utf-8') }
+}
 
 export function capOutput(s: string, max = MAX_OUTPUT_CHARS): { output: string; truncated: boolean } {
   if (s.length <= max) return { output: s, truncated: false }
@@ -224,10 +234,11 @@ registry.register({
   mutates: true,
   async run(args, ctx) {
     const abs = resolveSafe(String(args.path ?? ''), ctx)
-    if (!fs.existsSync(abs)) return { ok: false, output: `File not found: ${abs}` }
+    const read = readFileChecked(abs)
+    if (!read.ok) return read
     const oldStr = String(args.old ?? ''), newStr = String(args.new ?? '')
     if (!oldStr) return { ok: false, output: 'old must be non-empty' }
-    const content = fs.readFileSync(abs, 'utf-8')
+    const content = read.content
     const first = content.indexOf(oldStr)
     if (first === -1) return { ok: false, output: `old string not found in ${abs}. Read the file and match exactly (including whitespace).` }
     if (content.indexOf(oldStr, first + 1) !== -1) return { ok: false, output: `old string appears more than once in ${abs} — include more surrounding context to make it unique.` }
@@ -251,8 +262,11 @@ registry.register({
   mutates: true,
   async run(args, ctx) {
     const abs = resolveSafe(String(args.path ?? ''), ctx)
-    if (!fs.existsSync(abs)) return { ok: false, output: `File not found: ${abs}` }
-    const result = applyUnifiedPatch(fs.readFileSync(abs, 'utf-8'), String(args.patch ?? ''))
+    const read = readFileChecked(abs)
+    if (!read.ok) return read
+    const patchBody = String(args.patch ?? '')
+    if (!patchBody.trim()) return { ok: false, output: 'A non-empty "patch" argument (unified diff) is required.' }
+    const result = applyUnifiedPatch(read.content, patchBody)
     if (!result.ok) return { ok: false, output: result.error! }
     fs.writeFileSync(abs, result.text!, 'utf-8')
     ctx.emit?.({ type: 'diff', path: abs, patch: String(args.patch).slice(0, 2000) })

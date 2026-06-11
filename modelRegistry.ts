@@ -24,6 +24,20 @@ export interface ModelEntry {
   provider: 'groq' | 'mistral' | 'openrouter' | 'gemini' | 'huggingface' | 'cloudflare'
   speed: 'fast' | 'standard'      // fast = Groq dedicated inference
   params: number                   // parameter count in billions
+  /** Reliable native function-calling — eligible to DRIVE the agent loop. */
+  tools?: boolean
+}
+
+// ── Driver tier (orchestrator/worker split) ──────────────────────────────────
+// The driver is the best available instruction-follower with native tool-calling;
+// the cheap ensemble stays the worker tier (exposed to the driver as ensemble_solve).
+export function selectDriverCandidates(): ModelEntry[] {
+  return MODEL_REGISTRY
+    .filter(m => m.tools && m.free && getCircuitState(m.id) !== 'tripped')
+    .sort((a, b) =>
+      (b.quality - a.quality) ||
+      ((b.speed === 'fast' ? 1 : 0) - (a.speed === 'fast' ? 1 : 0)) ||
+      (b.params - a.params))
 }
 
 // ── Pipeline configuration ────────────────────────────────────────────────────
@@ -181,6 +195,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   // ── Groq ────────────────────────────────────────────────────────────────────
   {
     id: 'groq/llama-3.3-70b-versatile',
+    tools: true,
     params: 70,
     free: true,
     label: 'Llama 3.3 70B',
@@ -191,6 +206,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   },
   {
     id: 'groq/qwen/qwen3-32b',
+    tools: true,
     params: 32,
     free: true,
     label: 'Qwen3 32B',
@@ -201,6 +217,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   },
   {
     id: 'groq/llama-3.1-8b-instant',
+    tools: true,
     params: 8,
     free: true,
     label: 'Llama 3.1 8B',
@@ -222,6 +239,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   // ── Mistral ──────────────────────────────────────────────────────────────────
   {
     id: 'mistral/mistral-small-latest',
+    tools: true,
     params: 22,
     free: true,
     label: 'Mistral Small',
@@ -233,6 +251,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   // ── OpenRouter (free tier only) ─────────────────────────────────────────────
   {
     id: 'openrouter/openai/gpt-oss-120b:free',
+    tools: true,
     params: 120,
     label: 'GPT OSS 120B',
     free: true,
@@ -263,6 +282,7 @@ export const MODEL_REGISTRY: ModelEntry[] = [
   },
   {
     id: 'openrouter/openai/gpt-oss-20b:free',
+    tools: true,
     params: 20,
     label: 'GPT OSS 20B',
     free: true,
