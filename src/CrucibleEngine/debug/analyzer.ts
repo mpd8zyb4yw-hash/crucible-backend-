@@ -4,6 +4,7 @@
 // Predicts likely error types from accumulated history.
 // Persists learned patterns to .crucible/patterns.json
 // ============================================================
+/// <reference types="node" />
 
 import fs from 'fs'
 import path from 'path'

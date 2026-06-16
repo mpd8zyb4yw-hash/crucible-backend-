@@ -3,6 +3,7 @@
 // On-device execution for JS/TS/Python/Bash + syntax checking
 // for compiled languages. Zero API calls. Zero gimmicks.
 // ============================================================
+/// <reference types="node" />
 
 import * as vm from 'vm'
 import { spawn, ChildProcess } from 'child_process'
@@ -192,7 +193,7 @@ function executeJS(code: string, timeoutMs: number): Promise<ExecutionResult> {
     }
 
     try {
-      const script = new vm.Script(code, { timeout: timeoutMs })
+      const script = new vm.Script(code)
       vm.createContext(sandbox)
       script.runInContext(sandbox, { timeout: timeoutMs })
       resolve({

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { API_BASE, apiFetch } from './api'
 import CrucibleMark from './CrucibleMark'
-import { MODEL_REGISTRY } from './modelData'
+import './modelData'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -115,37 +115,8 @@ function ModeSwitcher({ mode, setMode, modeMenuOpen, setModeMenuOpen }: {
 
 
 // ── Rotating verb placeholder ─────────────────────────────────────────────────
-const VERBS = ['code', 'reason', 'analyze', 'refactor', 'research', 'problem-solve', 'synthesize', 'learn', 'test']
 
-function RotatingVerb() {
-  const [index, setIndex] = useState(0)
-  const [visible, setVisible] = useState(true)
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setVisible(false)
-      setTimeout(() => {
-        setIndex(i => (i + 1) % VERBS.length)
-        setVisible(true)
-      }, 300)
-    }, 2200)
-    return () => clearInterval(interval)
-  }, [])
-
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <span style={{ color: 'rgba(255,255,255,0.25)' }}>Crucible can </span>
-      <span style={{
-        color: 'rgba(124,124,248,0.6)',
-        display: 'inline-block',
-        transition: 'opacity 0.3s, transform 0.3s',
-        opacity: visible ? 1 : 0,
-        transform: visible ? 'translateY(0)' : 'translateY(-6px)',
-        fontStyle: 'italic',
-      }}>{VERBS[index]}</span>
-    </span>
-  )
-}
 
 function assignColors(models: Omit<DynamicModel, 'color' | 'rgb'>[]): DynamicModel[] {
   return models.map((m, i) => ({
@@ -425,117 +396,6 @@ function emptyRound(id: string, userMessage: string): Round {
   }
 }
 
-// ── Rounded-rect perimeter point (for prismatic ring animation) ───────────────
-function rrPoint(W: number, H: number, R: number, t: number): [number, number] {
-  R = Math.min(R, W / 2, H / 2)
-  const sw = W - 2 * R, sh = H - 2 * R
-  const ca = (Math.PI / 2) * R
-  const segs: Array<
-    | { kind: 'line'; len: number; x0: number; y0: number; dx: number; dy: number }
-    | { kind: 'arc';  len: number; cx: number; cy: number; a0: number; a1: number }
-  > = [
-    { kind: 'arc',  len: ca, cx: R,     cy: R,     a0: Math.PI,       a1: Math.PI * 1.5 },
-    { kind: 'line', len: sw, x0: R,     y0: 0,     dx: 1,  dy: 0 },
-    { kind: 'arc',  len: ca, cx: W - R, cy: R,     a0: Math.PI * 1.5, a1: Math.PI * 2   },
-    { kind: 'line', len: sh, x0: W,     y0: R,     dx: 0,  dy: 1 },
-    { kind: 'arc',  len: ca, cx: W - R, cy: H - R, a0: 0,             a1: Math.PI * 0.5 },
-    { kind: 'line', len: sw, x0: W - R, y0: H,     dx: -1, dy: 0 },
-    { kind: 'arc',  len: ca, cx: R,     cy: H - R, a0: Math.PI * 0.5, a1: Math.PI       },
-    { kind: 'line', len: sh, x0: 0,     y0: H - R, dx: 0,  dy: -1 },
-  ]
-  const total = 2 * sw + 2 * sh + 4 * ca
-  let d = (((t % 1) + 1) % 1) * total
-  for (const s of segs) {
-    if (d <= s.len + 1e-9) {
-      const f = s.len > 0 ? Math.min(d / s.len, 1) : 0
-      if (s.kind === 'arc') {
-        const angle = s.a0 + (s.a1 - s.a0) * f
-        return [s.cx + R * Math.cos(angle), s.cy + R * Math.sin(angle)]
-      } else {
-        return [s.x0 + s.dx * f * s.len, s.y0 + s.dy * f * s.len]
-      }
-    }
-    d -= s.len
-  }
-  return [R, 0]
-}
-
-function PrismaticRing({ thinking, done }: { thinking: boolean; done: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const stateRef  = useRef({ thinking, done })
-  stateRef.current = { thinking, done }
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')!
-    let animId: number, t = 0, completionT = 0
-    const dpr = window.devicePixelRatio || 1
-    const resize = () => {
-      canvas.width  = canvas.offsetWidth  * dpr
-      canvas.height = canvas.offsetHeight * dpr
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-    const drawRRect = (w: number, h: number, r: number) => {
-      ctx.beginPath()
-      ctx.moveTo(r, 0); ctx.lineTo(w - r, 0); ctx.arcTo(w, 0, w, r, r)
-      ctx.lineTo(w, h - r); ctx.arcTo(w, h, w - r, h, r)
-      ctx.lineTo(r, h); ctx.arcTo(0, h, 0, h - r, r)
-      ctx.lineTo(0, r); ctx.arcTo(0, 0, r, 0, r)
-      ctx.closePath()
-    }
-    const draw = () => {
-      const { thinking, done } = stateRef.current
-      const w = canvas.offsetWidth, h = canvas.offsetHeight
-      ctx.clearRect(0, 0, w, h)
-      const R = 14
-      if (thinking) {
-        t = (t + 0.004) % 1; completionT = 0
-        ctx.save(); drawRRect(w, h, R)
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore()
-        const trail = 0.22, steps = 120
-        for (let i = 0; i < steps; i++) {
-          const frac = i / steps
-          const pos = ((t - trail * (1 - frac)) % 1 + 1) % 1
-          const [px, py] = rrPoint(w, h, R, pos)
-          const hue = ((t * 720) + frac * 180) % 360
-          ctx.beginPath(); ctx.arc(px, py, 1.2 + frac * 1.8, 0, Math.PI * 2)
-          ctx.fillStyle = `hsla(${hue},100%,75%,${0.1 + frac * 0.45})`; ctx.fill()
-        }
-        const [lx, ly] = rrPoint(w, h, R, t)
-        const hue = (t * 720) % 360
-        ctx.beginPath(); ctx.arc(lx, ly, 2, 0, Math.PI * 2)
-        ctx.fillStyle = `hsla(${hue},100%,85%,0.75)`; ctx.fill()
-        const lg = ctx.createRadialGradient(lx, ly, 0, lx, ly, 7)
-        lg.addColorStop(0, `hsla(${hue},100%,80%,0.2)`); lg.addColorStop(1, `hsla(${hue},100%,60%,0)`)
-        ctx.beginPath(); ctx.arc(lx, ly, 7, 0, Math.PI * 2); ctx.fillStyle = lg; ctx.fill()
-      } else if (done) {
-        completionT = Math.min(completionT + 0.02, 1)
-        ctx.save(); drawRRect(w, h, R)
-        const grad = ctx.createLinearGradient(0, 0, w, 0)
-        grad.addColorStop(0,    `hsla(260,80%,70%,${completionT * 0.7})`)
-        grad.addColorStop(0.33, `hsla(180,80%,65%,${completionT * 0.7})`)
-        grad.addColorStop(0.66, `hsla(300,80%,70%,${completionT * 0.7})`)
-        grad.addColorStop(1,    `hsla(260,80%,70%,${completionT * 0.7})`)
-        ctx.strokeStyle = grad; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore()
-      } else {
-        ctx.save(); drawRRect(w, h, R)
-        ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1; ctx.stroke(); ctx.restore()
-      }
-      animId = requestAnimationFrame(draw)
-    }
-    resize(); window.addEventListener('resize', resize); draw()
-    return () => { cancelAnimationFrame(animId); window.removeEventListener('resize', resize) }
-  }, [])
-
-  return (
-    <canvas ref={canvasRef} style={{
-      position: 'absolute', inset: 0, width: '100%', height: '100%',
-      pointerEvents: 'none', borderRadius: 14,
-    }} />
-  )
-}
-
 function ShimmerBg({ thinking, mode }: { thinking: boolean; mode: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const ref = useRef(thinking); ref.current = thinking
@@ -573,62 +433,6 @@ function ShimmerBg({ thinking, mode }: { thinking: boolean; mode: string }) {
   return <canvas ref={canvasRef} style={{ position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none' }} />
 }
 
-function TerminalDrawer({ history }: { history: Array<{ cmd: string; out: string }> }) {
-  const bottomRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [history])
-  return (
-    <div style={{
-      margin: '0 20px', borderRadius: '12px 12px 0 0',
-      background: '#1c1c1e', border: '1px solid rgba(124,124,248,0.2)',
-      borderBottom: 'none', animation: 'slideUp 0.25s cubic-bezier(0.4,0,0.2,1)',
-      display: 'flex', flexDirection: 'column',
-    }}>
-      <div style={{
-        padding: '6px 14px', display: 'flex', alignItems: 'center',
-        justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.05)', flexShrink: 0,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          {['#ff5f56','#ffbd2e','#27c93f'].map(c => (
-            <span key={c} style={{ width: 8, height: 8, borderRadius: '50%', background: c, display: 'inline-block' }} />
-          ))}
-        </div>
-        <span style={{ fontSize: 10, color: '#444', fontFamily: 'monospace', letterSpacing: '0.08em' }}>crucible — zsh</span>
-        <span style={{ fontSize: 10, color: '#333', fontFamily: 'monospace' }}>~/Desktop/crucible</span>
-      </div>
-      <div style={{
-        height: 260, overflowY: 'auto', padding: '10px 14px',
-        fontFamily: '"SF Mono","Fira Code",monospace', fontSize: 12, lineHeight: 1.6,
-        color: '#c8c8d0', boxSizing: 'border-box', textAlign: 'left', userSelect: 'text',
-      }}>
-        {history.length === 0 ? (
-          <div style={{ color: '#333' }}>
-            <span style={{ color: '#7c7cf8' }}>crucible</span>
-            <span style={{ color: '#555' }}> ~ % </span>
-            <span style={{ color: '#444', fontStyle: 'italic' }}>ready</span>
-          </div>
-        ) : history.map((h, i) => {
-          const age = history.length - 1 - i
-          const opacity = age === 0 ? 1 : age === 1 ? 0.5 : Math.max(0.15, 0.5 - age * 0.08)
-          return (
-            <div key={i} style={{ marginBottom: 6, opacity, transition: 'opacity 0.3s' }}>
-              <div>
-                <span style={{ color: age === 0 ? '#7c7cf8' : '#444' }}>crucible</span>
-                <span style={{ color: '#555' }}> ~ % </span>
-                <span style={{ color: age === 0 ? '#e2e2e2' : '#888' }}>{h.cmd}</span>
-              </div>
-              {h.out && (
-                <div style={{ color: '#9a9aac', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginTop: 1 }}>
-                  {h.out.trimEnd()}
-                </div>
-              )}
-            </div>
-          )
-        })}
-        <div ref={bottomRef} />
-      </div>
-    </div>
-  )
-}
 
 // ── Pipeline Theater (Section 3) ─────────────────────────────────────────────
 // Full-width grid of per-model response cards shown when the user message is clicked.
@@ -1818,7 +1622,7 @@ export default function App() {
 
   // ── Reconnect state (Task 5) ──────────────────────────────────────────────
   const [reconnecting, setReconnecting] = useState(false)
-  const reconnectAttemptRef = useRef(0)
+
   const wasThinkingRef = useRef(false)
   const passiveEsRef = useRef<EventSource | null>(null)
 
@@ -1847,8 +1651,7 @@ export default function App() {
   const [govRequests, setGovRequests] = useState<any[]>([])
   const [govPending, setGovPending] = useState(0)
   const [googleStatus, setGoogleStatus] = useState<Record<string, boolean> | null>(null)
-  const [indexStats, setIndexStats] = useState<{ indexed: boolean; fileCount?: number; rootPath?: string } | null>(null)
-  const [indexing, setIndexing] = useState(false)
+
   const bottomRef  = useRef<HTMLDivElement>(null)
   const scrollRef  = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -4275,7 +4078,7 @@ export default function App() {
           <div className="crucible-model-cards" style={{ display: 'flex', gap: 5, width: '100%', maxWidth: 680, marginBottom: 8, paddingLeft: 14, paddingRight: 10, boxSizing: 'border-box' }}>
             {activeModels.map(model => {
               const isDone       = latestRound ? latestRound.done[model.id] : false
-              const pipelineDone = latestRound ? latestRound.synthesisDone : false
+
               const isActive     = thinking && !isDone
               const collapsed    = isDone && !thinking  // compact after reply
               const score        = latestRound?.stage2Done ? latestRound.avgScores[model.id] : undefined
@@ -4337,7 +4140,6 @@ export default function App() {
           </div>
         )}
         {(() => {
-          const accent = MODE_META[mode]?.color ?? '#7c7cf8'
           const accentRgb = mode === 'code' ? '77,184,158' : mode === 'seeker' ? '245,158,11' : '124,124,248'
           return (
         <div className="crucible-inputbox" style={{
@@ -4423,7 +4225,7 @@ export default function App() {
               return (
                 <button
                   className="crucible-send-btn"
-                  onClick={thinking ? stop : send}
+                  onClick={thinking ? stop : () => send()}
                   disabled={!thinking && input.trim().length < 4}
                   style={{
                     width: 26, height: 26, borderRadius: '50%', border: 'none',

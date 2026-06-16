@@ -92,16 +92,6 @@ export default function CrucibleMark({ thinking, done }: CrucibleMarkProps) {
     const DRIP_SPEED  = 0.008  // how fast drip falls (lower = slower, more fluid)
     const COLOR_SPEED = 0.003  // how fast color cycles
 
-    function lerpColor(
-      a: [number, number, number],
-      b: [number, number, number],
-      t: number
-    ): string {
-      const r = Math.round(a[0] + (b[0] - a[0]) * t)
-      const g = Math.round(a[1] + (b[1] - a[1]) * t)
-      const b_ = Math.round(a[2] + (b[2] - a[2]) * t)
-      return `rgb(${r},${g},${b_})`
-    }
 
     function currentDripColor(alpha: number): string {
       const a = DRIP_COLORS[colorIndex % DRIP_COLORS.length]
