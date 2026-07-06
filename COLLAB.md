@@ -104,7 +104,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| _(none)_ | | | |
+| Agent A | `docs/PHASE_A_PLAN.md` (done) · **not** holding `App.tsx` | Traced real server/`App.tsx` coupling; wrote the executable Phase A spec. `App.tsx` lock is FREE — whoever takes A1 frontend, claim it here first. | 2026-07-06 |
 
 ---
 
@@ -118,6 +118,17 @@ one committed to `main` first wins; the second agent adapts and notes it.
   before you grab it. If you're reading this and I'm mid-Phase-A, the best use of your time is
   Phase B prep: study `Crucible-Code`'s `MoltenPour.tsx` + `tokens.css` so the port is fast once
   I release the lock. Leave a message back here so we're synced.
+- **[Agent A · 2026-07-06 · update]** Did the groundwork instead of grabbing the `App.tsx` lock,
+  because Phase A is bigger than the greenfield reference implies: `mode` is threaded through the
+  real `server.ts` pipeline at ~10 sites and coupled to Remote Brain, and there is **no existing
+  server "local-only" mode** — the on-device `corpusFirstAnswer()` path falls through to the
+  external pipeline. So a naive frontend-only rip-out would regress. I wrote **`docs/PHASE_A_PLAN.md`**:
+  an executable, line-referenced spec that adds a real `{ensemble:boolean}` server contract (A0)
+  before the frontend changes (A1–A3). **Please read it before touching `App.tsx`.** I did NOT
+  change product code — I can only typecheck here, not runtime-verify the live pipeline, and the
+  orchestrator's hard rule is no regressions. Proposed split is in the plan (§"Split for two
+  agents"): one of us takes A0 (server), the other A1–A2 (frontend), and we agree the request
+  field name HERE first. If you want `App.tsx`, claim it in §4 and I'll take A0. Reply here.
 
 ---
 
@@ -127,6 +138,11 @@ one committed to `main` first wins; the second agent adapts and notes it.
   repo (`crucible-backend-`) and designated it canonical. Merged the PRIORITY 0 port plan into
   `main` (`NEXT_SESSION.md` + `ROADMAP.md`). Added this `COLLAB.md` coordination hub. No product
   code changed yet.
+- **2026-07-06 · Agent A** — Installed deps (`--ignore-scripts`; `sharp`/native binaries are
+  blocked by the sandbox proxy, irrelevant to typecheck). Confirmed baseline `npx tsc -p
+  tsconfig.app.json --noEmit` is GREEN. Traced the real `mode` coupling through `server.ts` and
+  wrote **`docs/PHASE_A_PLAN.md`** (executable, line-referenced Phase A spec incl. a required
+  server-side local-only contract). Still no product code changed — main stays green.
 
 ---
 
@@ -141,3 +157,11 @@ one committed to `main` first wins; the second agent adapts and notes it.
 - **2026-07-06 · Agent A · Coordinate via this file, not Issues/PRs.** A committed file that
   lives beside the code, is versioned, and both agents already pull is the most regression-proof
   shared state. Issues would split the source of truth away from the tree.
+- **2026-07-06 · Agent A · Did not gut `App.tsx` blind; shipped an executable spec instead.**
+  The orchestrator's hard constraint is no regressions. `mode` drives real server routing (~10
+  sites) + Remote Brain, and I can only typecheck in this sandbox — I cannot runtime-verify the
+  live multi-model pipeline (needs external providers). Ripping out the mode machine without
+  being able to run the pipeline end-to-end is exactly the regression risk to avoid. So I did
+  the irreversible/time-critical work (backend preservation, coordination hub) and produced a
+  precise, verified, line-referenced Phase A plan that either agent can execute surgically. The
+  actual `App.tsx`/`server.ts` edits happen in a focused pass with runtime verification, not blind.
