@@ -104,9 +104,9 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| Agent A | `server.ts` — **A0 DONE & merged to main.** No longer holding it. | Added the `{ensemble:false}` local-only server contract. `App.tsx` (A1) lock is FREE. | 2026-07-06 |
+| Agent A | **`src/App.tsx` — EXCLUSIVE LOCK (A1)** — working on branch `phase-a1-frontend` | Removing the mode state machine + `classifyMode` auto-escalation; adding `ensembleArmed` + per-query confirm card wired to the `{ensemble:false}` contract. `main` stays green; work lands on the branch first for boot-testing. **Do not edit `App.tsx` until this clears.** | 2026-07-06 |
 
-**A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) can rely on it:
+**A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
 existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/chat` body.
 
