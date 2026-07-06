@@ -104,7 +104,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| Agent A | **`src/App.tsx` — EXCLUSIVE LOCK (A1)** — working on branch `phase-a1-frontend` | Removing the mode state machine + `classifyMode` auto-escalation; adding `ensembleArmed` + per-query confirm card wired to the `{ensemble:false}` contract. `main` stays green; work lands on the branch first for boot-testing. **Do not edit `App.tsx` until this clears.** | 2026-07-06 |
+| _(none — App.tsx lock RELEASED)_ | | A1 is done on branch `phase-a1-frontend`, typecheck-verified, awaiting a boot-test before merge (see §5). Whoever can run the app: boot-test it, then merge. | |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
@@ -145,6 +145,20 @@ existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/
   after the confirm card. I can't runtime-test the live pipeline in my sandbox (no external
   providers), so please boot it (`npm run dev`) and verify the on-device path when you wire the
   frontend — flag anything off back here.
+- **[Agent A · 2026-07-06 · A1 done on branch]** Went ahead and did A1 too (frontend) on branch
+  **`phase-a1-frontend`** — it's typecheck-clean (`npx tsc -p tsconfig.app.json --noEmit` green).
+  What it does: removed `classifyMode` auto-escalation + the `ModeSwitcher` 3-mode picker;
+  added an ON-DEVICE/ENSEMBLE opt-in toggle in the composer; `send()` now posts `ensemble:false`
+  by default (→ A0 on-device path) and shows a per-query confirm card ([Crucible only] / [Run
+  ensemble]) when armed. I kept `mode` as an internal routing detail (Remote Brain + persistence
+  + ShimmerBg still read it) rather than ripping it out fully — see Decisions Log. **I did NOT
+  merge to main**: A1 changes default runtime behavior and I can't boot the app here (no external
+  providers, no built native deps), so it needs a real boot-test first. **Handoff: whoever can
+  run `npm run dev` — smoke-test the branch** (default query answers on-device with zero provider
+  calls; arm ensemble → confirm card → full pipeline; Remote Brain still routes to the agent
+  loop), then merge `phase-a1-frontend` → `main`. Left to do: **A3** (hide pipeline theater/log
+  for on-device replies) and **Phase B** (molten-pour animation + tokens). `App.tsx` lock is
+  released.
 
 ---
 
@@ -166,6 +180,13 @@ existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/
   31→31 vs baseline) and esbuild-transpiles. Backward-compatible: absent `ensemble` field = old
   behavior, so it's inert until the redesigned composer (A1) opts in. Regression risk: none for
   existing clients. Remaining Phase A: A1–A3 (frontend, `App.tsx`) — open for the other agent.
+- **2026-07-06 · Agent A · A1 DONE (branch `phase-a1-frontend`, not yet merged)** — Removed the
+  `classifyMode` auto-escalation, the `ModeSwitcher` picker, `modeMenuOpen`/dismiss-effect, and
+  the orphaned `MODES`/`Mode`. Added an on-device/ensemble opt-in toggle + per-query confirm
+  card; `send()` posts `ensemble:false` by default. `mode` retained internally (see Decisions
+  Log). `npx tsc -p tsconfig.app.json --noEmit` clean. Kept OFF main pending a boot-test because
+  it changes default runtime behavior and this sandbox can't run the live pipeline. Next: A3
+  (chrome gating) + Phase B (animation).
 
 ---
 
@@ -180,6 +201,13 @@ existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/
 - **2026-07-06 · Agent A · Coordinate via this file, not Issues/PRs.** A committed file that
   lives beside the code, is versioned, and both agents already pull is the most regression-proof
   shared state. Issues would split the source of truth away from the tree.
+- **2026-07-06 · Agent A · A1 keeps `mode` as an internal routing detail (didn't fully delete it).**
+  The v3 spec says "delete the mode state machine," but `mode` is read by the real `server.ts`
+  routing, the Remote Brain agent hand-off (`modeOverride='agent'`), the ShimmerBg tint, and
+  session persistence (`session.mode`). Fully removing it touches paths I can't boot-test in this
+  sandbox, so I honored the *behavioral* intent (no picker, no auto-escalation, on-device default
+  via `ensemble:false`) while leaving `mode` as an internal constant. Fully excising `mode` is a
+  safe follow-up for whoever can run Remote Brain + persistence end-to-end. Reversible; documented.
 - **2026-07-06 · Agent A · Did not gut `App.tsx` blind; shipped an executable spec instead.**
   The orchestrator's hard constraint is no regressions. `mode` drives real server routing (~10
   sites) + Remote Brain, and I can only typecheck in this sandbox — I cannot runtime-verify the
