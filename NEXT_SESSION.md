@@ -6,6 +6,75 @@
 
 ---
 
+## PRIORITY 0 — Port the v3 UI Redesign Into `src/App.tsx` (two-agent parallel effort)
+
+**Decision (2026-07-06), resolved without going back to Justin — see reasoning below.**
+
+A separate GitHub repo, `mpd8zyb4yw-hash/Crucible-Code`, holds a Claude-Design handoff bundle
+for a UI redesign (`project/Crucible v3.dc.html` spec + `project/HANDOFF - Claude Code
+implementation brief.md`). The brief's stated target was this repo's `src/App.tsx` — but what
+actually got built there is a **from-scratch greenfield app**
+(`crucible-local/crucible-local/`, plain Vite + React + zustand, ~1,500 lines across all
+files) rather than an edit of this monolith. It was verified against the brief and is
+functionally correct: mode picker and `classifyMode` auto-escalation gone, ensemble is
+opt-in with a per-query confirm card, API keys are a blank-slate name+value list, and the
+molten-pour animation is ported and wired to real stream lifecycle events (not timers).
+
+**Why it's a reference implementation, not a replacement.** Its `CrucibleEngine/` is entirely
+stubbed — `localModel.ts` is a templated zero-network responder, `tools/index.ts` has two toy
+tools, `ensemble.ts` only makes a real HTTP call when a key's value happens to contain a URL.
+None of that is real next to what this repo already has: an actual pipeline (`server.ts`,
+`modelRegistry.ts` `PIPELINE_CONFIG`), the real tool/agent surface, self-patcher, benchmark
+suite, corpus grounding — years of production logic this repo's own ROADMAP.md documents.
+Throwing that away to adopt the greenfield app wholesale would be a regression, not a redesign.
+Confirmed via `git log` here that no redesign work has landed in this repo — `ModeSwitcher`,
+`classifyMode`, and the always-visible pipeline chrome are all still present and unchanged
+(`src/App.tsx` lines ~43, ~1444, ~1629, ~2780, ~4195).
+
+**The plan: port the validated UI/UX pieces into this repo's real `App.tsx`, keep every real
+backend integration.** Treat `Crucible-Code`'s `crucible-local/crucible-local/` as the spec —
+read it for exact behavior/shape — but reimplement against this repo's real state, real
+`CrucibleEngine/tools/` + `agent/`, real `modelRegistry.ts`. Do not import its stub engine
+files. Do not delete this repo's real tool implementations while porting UI.
+
+**This file is monolithic (`App.tsx`, ~223KB) — high collision risk for two agents working at
+once.** Split into sequential phases with a hard handoff, not free-for-all parallel file
+ownership like a normal multi-file project would allow:
+
+- **Phase A (Agent 1 — structural/state):** Remove the `mode` state machine, `ModeSwitcher`,
+  and `classifyMode` auto-escalation (`src/App.tsx` ~L1444, ~L1629, ~L2780, ~L4195). Replace
+  with: Crucible-local-FM is the only default path; ensemble is opt-in via a toggle +
+  per-query confirm card (mirror `crucible-local/crucible-local/src/components/chat/
+  Composer.tsx` + `state/store.ts`'s `confirm`/`ensembleArmed` shape). Gate
+  `crucible-pipeline-theater`/`-status`/`-log` (~L504/L4060/L4688 per the original brief) behind
+  that confirm — never default-visible. **Commit + push a working checkpoint (`tsc` clean, app
+  boots, existing tools/agent regression-tested) before Phase B starts.**
+- **Phase B (Agent 2 — visual/animation, starts only after Phase A lands):** Port
+  `MoltenPour.tsx`'s animation (thinking → pouring → cooling, real stream-lifecycle triggers,
+  1350ms fill floor / 1000ms cool floor) and `styles/tokens.css`'s design tokens into this
+  app's streaming-reply UI. Reference implementation:
+  `Crucible-Code` repo, `crucible-local/crucible-local/src/components/chat/MoltenPour.tsx` and
+  `src/styles/tokens.css`. Verify against `project/Crucible v3.dc.html` in the Crucible-Code
+  repo for exact easing/color values.
+
+**Whichever agent is not doing Phase A right now:** don't start Phase B against the
+pre-Phase-A structure — you'll be porting animation logic into DOM/JSX that Phase A is about
+to delete. Use the time to read the reference implementation and this repo's real
+`App.tsx` streaming-render code so Phase B is fast once Phase A lands, or pick up other
+priorities below.
+
+**Active claim:**
+
+| Agent | Phase | Status | Started |
+|---|---|---|---|
+| _(none yet)_ | | | |
+
+Update the row above when you start; append a dated entry to ROADMAP.md's CHANGE LOG when a
+phase lands (per this repo's standing rule — verify wiring with `grep` before marking done,
+same as everywhere else in this file).
+
+---
+
 ## PRIORITY 1 — Close the Learning Loop (The Compounding Gap)
 
 **The problem:**

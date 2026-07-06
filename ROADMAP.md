@@ -1346,6 +1346,21 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-06 — Resolved v3 UI redesign's canonical-repo question; set up two-agent port plan
+
+A separate repo (`mpd8zyb4yw-hash/Crucible-Code`) held a Claude Design handoff bundle whose
+brief targeted this repo's `src/App.tsx`, but the delivered implementation was actually a
+from-scratch greenfield app (`crucible-local/crucible-local/`) with a fully stubbed backend
+(fake local model, two toy tools, semi-fake ensemble). Verified via `git log` that no redesign
+work has landed here — `ModeSwitcher`/`classifyMode`/always-visible pipeline chrome are all
+still present and unchanged. Decision: the greenfield app is a validated reference
+implementation to port UI/UX from (mode-machine removal, opt-in-ensemble confirm flow,
+molten-pour animation, design tokens), not a replacement — this repo's real `server.ts`
+pipeline, `CrucibleEngine/tools/`+`agent/`, and self-improvement infra stay. Added
+**PRIORITY 0** to `NEXT_SESSION.md` with a two-phase (not fully parallel, due to
+`App.tsx` being one 223KB file) plan for two coding agents to execute this port, plus a live
+claims table. No `App.tsx` changes made yet — this session was investigation + planning only.
+
 ### 2026-06-15 — Track O Layer 1 + Remote Brain fixes (stream size, send button, semantic corpus)
 
 **Remote Brain — black screen / slow connection (root cause: frame size, not delivery):**
