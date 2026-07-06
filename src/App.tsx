@@ -27,12 +27,8 @@ interface DynamicModel {
 
 
 // ── Mode definitions ──────────────────────────────────────────────────────────
-const MODES = [
-  { id: 'quorum', label: 'QUORUM', color: '#7c7cf8' },
-  { id: 'code',   label: 'CODE',   color: '#4db89e' },
-  { id: 'seeker', label: 'SEEKER', color: '#f87171' },
-] as const
-type Mode = typeof MODES[number]['id']
+// v3: the user-facing MODES picker and its `Mode` type were removed. `MODE_META` is kept only
+// for the internal ShimmerBg/accent tint keyed off the retained internal `mode` value.
 
 const MODE_META: Record<string, { label: string; hint: string; color: string }> = {
   quorum: { label: 'Ensemble', hint: 'Multi-model pipeline', color: '#7c7cf8' },
@@ -40,78 +36,8 @@ const MODE_META: Record<string, { label: string; hint: string; color: string }> 
   seeker: { label: 'Search',   hint: 'Web-augmented',       color: '#f59e0b' },
 }
 
-function ModeSwitcher({ mode, setMode, modeMenuOpen, setModeMenuOpen }: {
-  mode: Mode
-  setMode: (m: Mode) => void
-  modeMenuOpen: boolean
-  setModeMenuOpen: (o: boolean) => void
-}) {
-  const active = MODE_META[mode]
-  const accentRgb = mode === 'code' ? '77,184,158' : mode === 'seeker' ? '245,158,11' : '124,124,248'
-  const otherModes = MODES.filter(m => m.id !== mode)
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-      {/* Collapsed pill — always visible */}
-      <button
-        onPointerDown={e => { e.stopPropagation(); setModeMenuOpen(!modeMenuOpen) }}
-        className={`crucible-pill${modeMenuOpen ? ' crucible-pill--active' : ''}`}
-        title={active.hint}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 5,
-          padding: '4px 9px', borderRadius: 8, border: 'none', cursor: 'pointer',
-          background: modeMenuOpen ? `rgba(${accentRgb},0.15)` : 'rgba(255,255,255,0.05)',
-          transition: 'background 0.2s',
-          userSelect: 'none' as const,
-        }}
-      >
-        <span style={{
-          width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
-          background: active.color, boxShadow: `0 0 6px ${active.color}99`,
-        }} />
-        <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.05em', color: active.color }}>
-          {active.label}
-        </span>
-        <span style={{
-          fontSize: 8, color: active.color, opacity: 0.5,
-          transform: modeMenuOpen ? 'rotate(180deg)' : 'none',
-          transition: 'transform 0.18s', display: 'inline-block', lineHeight: 1,
-        }}>▴</span>
-      </button>
-
-      {/* Inline expansion — other modes appear to the right, no popup */}
-      {modeMenuOpen && otherModes.map((m, i) => {
-        const meta = MODE_META[m.id]
-        const rgb = m.id === 'code' ? '77,184,158' : m.id === 'seeker' ? '245,158,11' : '124,124,248'
-        return (
-          <button
-            key={m.id}
-            onPointerDown={e => { e.stopPropagation(); setMode(m.id); setModeMenuOpen(false); haptic('light') }}
-            title={meta.hint}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 5,
-              padding: '4px 9px', borderRadius: 8, border: 'none', cursor: 'pointer',
-              background: 'rgba(255,255,255,0.05)',
-              opacity: 0, animation: `fanIn 0.12s ease forwards`,
-              animationDelay: `${i * 0.05}s`,
-              transition: 'background 0.15s',
-              userSelect: 'none' as const,
-              outline: `1px solid rgba(${rgb},0.2)`,
-            }}
-          >
-            <span style={{
-              width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
-              background: meta.color, opacity: 0.7,
-            }} />
-            <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.05em', color: 'rgba(255,255,255,0.45)' }}>
-              {meta.label}
-            </span>
-          </button>
-        )
-      })}
-    </div>
-  )
-}
+// ModeSwitcher (the 3-mode picker) removed in v3 — routing is now on-device-by-default
+// with an explicit ensemble opt-in in the composer. See docs/PHASE_A_PLAN.md (A1).
 
 
 // ── Rotating verb placeholder ─────────────────────────────────────────────────
@@ -1441,7 +1367,16 @@ export default function App() {
     stepIndex: number; stepTotal: number; iter: number; maxIters: number
     savedAt: number
   } | null>(null)
+  // `mode` is retained as an INTERNAL routing detail (server routing, Remote Brain agent
+  // hand-off, ShimmerBg tint, session persistence all read it). The v3 redesign removes the
+  // user-facing 3-mode picker and the complexity auto-escalation — see `ensembleArmed` below.
   const [mode, setMode] = useState<'quorum'|'code'|'seeker'>('quorum')
+  // ── v3 opt-in ensemble ────────────────────────────────────────────────────────
+  // Default path is Crucible on-device only (request sends `ensemble:false` → server A0 path,
+  // zero external calls). The user must explicitly ARM ensemble, and even armed, every send
+  // shows a per-query confirm card — it never auto-escalates. See docs/PHASE_A_PLAN.md (A1/A2).
+  const [ensembleArmed, setEnsembleArmed] = useState(false)
+  const [pendingEnsembleConfirm, setPendingEnsembleConfirm] = useState<string | null>(null)
 
   // ── Step 9: Remote Brain mode (phone only) ────────────────────────────────
   const [remoteBrain, setRemoteBrain] = useState(false)
@@ -1626,23 +1561,9 @@ export default function App() {
   const wasThinkingRef = useRef(false)
   const passiveEsRef = useRef<EventSource | null>(null)
 
-  const classifyMode = (text: string, lastMode?: 'quorum'|'code'|'seeker'): 'quorum'|'code'|'seeker' => {
-    const m = text.toLowerCase()
-    const isShortFollowUp = text.trim().split(' ').length <= 3
-    if (isShortFollowUp && lastMode && lastMode !== 'quorum') return lastMode
-    // Complexity override: long multi-part prompts → ensemble regardless of opening keyword.
-    // "Research X: (1) ... (2) ..." is a synthesis task, not a search/retrieval task.
-    const approxTokens = text.trim().split(/\s+/).length * 0.75
-    const hasNumberedParts = /\(\d+\)|\d+[\.\)]\s+\w/.test(text)
-    if (approxTokens > 200 && hasNumberedParts) return lastMode === 'code' ? 'code' : 'quorum'
-    // "Research" as an imperative verb with downstream productive intent → synthesis, not retrieval.
-    // "Research and produce/write/analyze X" ≠ "research [topic]" as a search noun.
-    if (/\bresearch\b[\s\S]{0,80}\b(and|then|to)\b[\s\S]{0,60}\b(produce|write|create|analy[sz]e|compare|synthesi[sz]e|outline|draft|generate|build|develop|make|compile|prepare|compose|report|evaluate|assess|summari[sz]e|explore)\b/i.test(text)) return lastMode === 'code' ? 'code' : 'quorum'
-    if (/\b(search|find|look up|latest|news|current|today|who is|what is|when did|where is|research|weather|price|stock|forecast|temperature)\b/.test(m)) return 'seeker'
-    if (/\b(code|write|build|create|function|script|debug|fix|implement|refactor|file|class|component|api|error|bug|compile|run|execute)\b/.test(m)) return 'code'
-    return lastMode ?? 'quorum'
-  }
-  const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  // v3: `classifyMode()` (complexity/keyword auto-escalation into ensemble/seeker/code) was
+  // removed here — it's why every non-trivial query used to hit the pipeline. Routing is now
+  // explicit: on-device by default, ensemble only on user opt-in + per-query confirm.
   const [showMinLengthTip, setShowMinLengthTip] = useState(false)
   const minLengthTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [feedHovered, setFeedHovered] = useState(false)
@@ -1765,13 +1686,6 @@ export default function App() {
   }, [rounds])
 
 
-  // Dismiss mode fan on outside tap
-  useEffect(() => {
-    if (!modeMenuOpen) return
-    const handler = () => setModeMenuOpen(false)
-    window.addEventListener('pointerdown', handler)
-    return () => window.removeEventListener('pointerdown', handler)
-  }, [modeMenuOpen])
 
   // ── Live agent timer ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -2061,12 +1975,21 @@ export default function App() {
       })
       .catch(() => {})
   }, [])
-  const send = async (overrideMessage?: string, modeOverride?: string) => {
+  const send = async (overrideMessage?: string, modeOverride?: string, ensembleDecision?: boolean) => {
     // In Remote Brain mode every send goes straight to the Mac agent loop.
     if (remoteBrain && !modeOverride) modeOverride = 'agent'
     if (thinking) return
     const userMessage = (overrideMessage ?? input).trim()
     if (!userMessage || userMessage.length < 4) return
+    // v3 opt-in ensemble: if armed and this isn't an explicit decision or an agent hand-off,
+    // surface the per-query confirm card instead of sending. The card calls back into send()
+    // with an explicit ensembleDecision. Unarmed → always on-device (ensemble:false).
+    if (ensembleDecision === undefined && !modeOverride && ensembleArmed) {
+      setPendingEnsembleConfirm(userMessage)
+      return
+    }
+    const useEnsemble = ensembleDecision === true
+    setPendingEnsembleConfirm(null)
     const roundId = Date.now().toString()
     localStorage.setItem('crucible_has_sent', '1')
     setInput(''); setThinking(true); scrollLockedRef.current = false; setShowScrollBtn(false); haptic('medium')
@@ -2098,6 +2021,9 @@ export default function App() {
         body: JSON.stringify({
           message: userMessage,
           mode: modeOverride ?? mode,
+          // v3: on-device by default; only a confirmed opt-in fans out to the ensemble pipeline.
+          // Agent / Remote Brain hand-offs (modeOverride) ignore this (server routes on `mode`).
+          ensemble: modeOverride ? undefined : useEnsemble,
           sessionId,
           roundId,  // lets the server patch the finished answer into THIS round if we disconnect
           prewarmToken: prewarmTokenRef.current,
@@ -2777,7 +2703,8 @@ export default function App() {
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
     setInput(val)
-    setMode(classifyMode(val, mode))
+    // v3: no complexity auto-escalation — typing never silently switches modes / routes to
+    // the ensemble. On-device is the default; ensemble is opt-in via the composer toggle.
     const ta = e.target
     requestAnimationFrame(() => {
       ta.style.height = 'auto'
@@ -4189,10 +4116,66 @@ export default function App() {
             />
           </div>
 
+          {/* v3 — per-query ensemble confirm card. Shown when ensemble is armed and the user
+              hits send: even armed, we never auto-escalate — every ensemble run is confirmed. */}
+          {pendingEnsembleConfirm && (
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 9,
+              padding: '11px 13px', marginTop: 10, borderRadius: 12,
+              background: 'rgba(124,124,248,0.06)', border: '1px solid rgba(124,124,248,0.22)',
+            }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#c8c8f0' }}>Use ensemble for this?</span>
+              <span style={{ fontSize: 11, lineHeight: 1.4, color: 'rgba(255,255,255,0.5)', wordBreak: 'break-word' }}>
+                Ensemble fans out to external models. Crucible answers this on-device with zero
+                external calls unless you choose to run the ensemble.
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => { const t = pendingEnsembleConfirm; setPendingEnsembleConfirm(null); if (t) send(t, undefined, false) }}
+                  style={{
+                    flex: '1 1 auto', padding: '7px 12px', borderRadius: 9, cursor: 'pointer',
+                    border: '1px solid rgba(77,184,158,0.35)', background: 'rgba(77,184,158,0.1)',
+                    color: '#4db89e', fontSize: 11, fontWeight: 600, letterSpacing: '0.03em',
+                  }}
+                >Crucible only</button>
+                <button
+                  onClick={() => { const t = pendingEnsembleConfirm; setPendingEnsembleConfirm(null); if (t) send(t, undefined, true) }}
+                  style={{
+                    flex: '1 1 auto', padding: '7px 12px', borderRadius: 9, cursor: 'pointer',
+                    border: '1px solid rgba(124,124,248,0.4)', background: 'rgba(124,124,248,0.16)',
+                    color: '#a5a5ff', fontSize: 11, fontWeight: 600, letterSpacing: '0.03em',
+                  }}
+                >Run ensemble</button>
+              </div>
+            </div>
+          )}
+
           {/* ── Row 2: toolbar pills + send button ── */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingTop: 11 }}>
-            {/* Mode selector — Studio toggle is nested inside its expansion fan */}
-            <ModeSwitcher mode={mode} setMode={setMode} modeMenuOpen={modeMenuOpen} setModeMenuOpen={setModeMenuOpen} />
+            {/* v3 — Ensemble opt-in toggle (replaces the old 3-mode picker). Off = Crucible
+                on-device only, zero external calls. On = arm ensemble; each send still confirms. */}
+            <button
+              onPointerDown={e => { e.stopPropagation(); setEnsembleArmed(a => !a); haptic('light') }}
+              className={`crucible-pill${ensembleArmed ? ' crucible-pill--active' : ''}`}
+              title={ensembleArmed
+                ? 'Ensemble armed — each send asks to confirm before using external models'
+                : 'Crucible on-device only. Tap to arm the multi-model ensemble (opt-in).'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '4px 9px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                background: ensembleArmed ? 'rgba(124,124,248,0.15)' : 'rgba(255,255,255,0.05)',
+                transition: 'background 0.2s', userSelect: 'none' as const,
+              }}
+            >
+              <span style={{
+                width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
+                background: ensembleArmed ? '#7c7cf8' : '#4db89e',
+                boxShadow: `0 0 6px ${ensembleArmed ? '#7c7cf8' : '#4db89e'}99`,
+              }} />
+              <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.05em', color: ensembleArmed ? '#7c7cf8' : '#4db89e' }}>
+                {ensembleArmed ? 'ENSEMBLE' : 'ON-DEVICE'}
+              </span>
+            </button>
 
             {/* Step 9: Remote Brain — phone only */}
             {isMobile && (
