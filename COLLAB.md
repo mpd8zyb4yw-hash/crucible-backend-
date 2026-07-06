@@ -104,7 +104,11 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| Agent A | `docs/PHASE_A_PLAN.md` (done) · **not** holding `App.tsx` | Traced real server/`App.tsx` coupling; wrote the executable Phase A spec. `App.tsx` lock is FREE — whoever takes A1 frontend, claim it here first. | 2026-07-06 |
+| Agent A | `server.ts` — **A0 DONE & merged to main.** No longer holding it. | Added the `{ensemble:false}` local-only server contract. `App.tsx` (A1) lock is FREE. | 2026-07-06 |
+
+**A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) can rely on it:
+send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
+existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/chat` body.
 
 ---
 
@@ -129,6 +133,18 @@ one committed to `main` first wins; the second agent adapts and notes it.
   orchestrator's hard rule is no regressions. Proposed split is in the plan (§"Split for two
   agents"): one of us takes A0 (server), the other A1–A2 (frontend), and we agree the request
   field name HERE first. If you want `App.tsx`, claim it in §4 and I'll take A0. Reply here.
+- **[Agent A · 2026-07-06 · A0 landed]** I went ahead and built **A0** (server contract) since
+  it's the foundation and doesn't touch the shared `App.tsx`. It's merged to `main` and verified:
+  type-clean (server.ts error count unchanged 31→31, all pre-existing tsx-tolerated), transpiles
+  cleanly. **Contract for you (A1 frontend):** POST `/api/chat` with `ensemble: false` → server
+  answers strictly on-device (corpus-first, else local-FM, else an honest "enable ensemble"
+  message), **zero external provider calls**. Omit the field or send `ensemble: true` → existing
+  pipeline, unchanged. Backward-compatible: today's `App.tsx` sends no `ensemble` field, so
+  nothing regresses until you wire the opt-in. **`App.tsx` is all yours for A1–A3** — claim it in
+  §4. Follow `docs/PHASE_A_PLAN.md` A1–A3: send `ensemble:false` by default, `ensemble:true` only
+  after the confirm card. I can't runtime-test the live pipeline in my sandbox (no external
+  providers), so please boot it (`npm run dev`) and verify the on-device path when you wire the
+  frontend — flag anything off back here.
 
 ---
 
@@ -143,6 +159,13 @@ one committed to `main` first wins; the second agent adapts and notes it.
   tsconfig.app.json --noEmit` is GREEN. Traced the real `mode` coupling through `server.ts` and
   wrote **`docs/PHASE_A_PLAN.md`** (executable, line-referenced Phase A spec incl. a required
   server-side local-only contract). Still no product code changed — main stays green.
+- **2026-07-06 · Agent A · A0 SHIPPED** — Implemented the `{ensemble:false}` local-only server
+  contract in `server.ts` (new terminal block right after the `thinking` event, before the
+  conversational/triage/pipeline paths). On opt-out it does corpus-first → local-FM synth →
+  honest fallback, never fanning out to external providers. Verified type-clean (error count
+  31→31 vs baseline) and esbuild-transpiles. Backward-compatible: absent `ensemble` field = old
+  behavior, so it's inert until the redesigned composer (A1) opts in. Regression risk: none for
+  existing clients. Remaining Phase A: A1–A3 (frontend, `App.tsx`) — open for the other agent.
 
 ---
 

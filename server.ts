@@ -1881,6 +1881,72 @@ app.post('/api/chat', async (req, res) => {
   // Instant first token — client shows "Analyzing…" immediately, before any model work
   send({ type: 'thinking' })
 
+  // ── A0 — Crucible-only path (ensemble opt-out) ────────────────────────────────
+  // v3 redesign contract: when the client has NOT opted into the ensemble
+  // (request body `ensemble:false`), answer strictly on-device and NEVER fan out to
+  // external providers — corpus-first when coverage is strong, else a local-FM
+  // synthesis, else an honest "enable ensemble" message. If `ensemble` is absent the
+  // whole block is skipped, so existing clients are behaviourally unchanged (this is
+  // dead code until the redesigned composer opts in). Agentic / Remote-Brain requests
+  // (mode 'agent'/'seeker'/'code') are handled by the agent gate above and never reach
+  // here. See docs/PHASE_A_PLAN.md (step A0).
+  if (req.body.ensemble === false && mode !== 'agent' && mode !== 'seeker' && mode !== 'code') {
+    const localPromptType = classifyPrompt(message)
+    const emitLocal = (text: string, modelId: string, modelLabel: string) => {
+      send({ type: 'contract', promptType: localPromptType, requiredStructure: [], forbiddenAntipatterns: [] })
+      send({ type: 'stage', stage: 1, status: 'start' })
+      send({ type: 'layer1', modelId, model: modelLabel, text, done: true })
+      send({ type: 'stage', stage: 1, status: 'done' })
+      send({ type: 'synthesis', modelId, model: modelLabel, text, done: true, replace: false })
+      send({ type: 'stage', stage: 5, status: 'done' })
+      patchActiveSessionRound(chatUser, chatRoundId, { synthesis: text, synthesisDone: true, synthStreaming: false })
+      res.write('data: [DONE]\n\n'); res.end()
+    }
+    try {
+      if (localInferenceAvailable) {
+        // 1) Corpus-first — strongest on-device answer when coverage is good.
+        const corpusAns = await Promise.race([
+          corpusFirstAnswer(message, localPromptType, { localSynth: (sys: string, usr: string) => callLocalModel(sys, usr, 20000) }),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 3000)),
+        ])
+        if (corpusAns) {
+          const domains = [...new Set(corpusAns.sources.map(s => s.domain))].join(', ')
+          const answerText = `${applyVoiceLayer(corpusAns.answer)}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
+          debugBus.emit('pipeline', 'local_only_corpus', { confidence: corpusAns.confidence, sources: corpusAns.sources.length }, { severity: 'success', requestId })
+          emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
+          return
+        }
+        // 2) Local-FM synthesis — corpus missed, still answer on-device, no external calls.
+        const local = await callLocalModel(
+          'You are Crucible, answering entirely on-device. Be accurate and direct. If you are unsure, say so plainly rather than inventing specifics.',
+          message,
+          30000,
+        )
+        if (local.trim()) {
+          const answerText = `${applyVoiceLayer(local.trim())}\n\n*Answered on-device by Crucible — no external models used.*`
+          debugBus.emit('pipeline', 'local_only_synth', { chars: local.length }, { severity: 'info', requestId })
+          emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
+          return
+        }
+      }
+      // 3) On-device unavailable / empty — be honest, do NOT silently fan out.
+      const offMsg = `Crucible's on-device model isn't available for this query right now, and ensemble mode is off. Turn on ensemble for this question to use the multi-model pipeline.`
+      send({ type: 'synthesis', modelId: 'system', model: 'Crucible', text: offMsg, done: true, replace: false })
+      send({ type: 'stage', stage: 5, status: 'done' })
+      res.write('data: [DONE]\n\n'); res.end()
+      return
+    } catch (e: any) {
+      console.warn('[Pipeline] local-only path error:', e?.message ?? e)
+      try {
+        const errMsg = `Crucible hit an error answering on-device, and ensemble mode is off. Turn on ensemble to retry with the full pipeline.`
+        send({ type: 'synthesis', modelId: 'system', model: 'Crucible', text: errMsg, done: true, replace: false })
+        send({ type: 'stage', stage: 5, status: 'done' })
+        res.write('data: [DONE]\n\n'); res.end()
+      } catch {}
+      return
+    }
+  }
+
   // ── M1 — Conversational mode: catch casual/low-content inputs before pipeline ──
   // "test" → "Ready when you are" not a dictionary definition.
   // No ensemble, no calibration, no web grounding — just a natural response.
