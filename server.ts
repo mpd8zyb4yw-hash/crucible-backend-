@@ -31,6 +31,7 @@ import { needsPlan, runPlannedTask } from './src/CrucibleEngine/agent/planner'
 import { defaultSystemPreamble } from './src/CrucibleEngine/agent/loop'
 import { extractSubtasks } from './src/CrucibleEngine/goalDecomposer'
 import { detectConversational, buildConversationalFallback, applyVoiceLayer } from './src/CrucibleEngine/conversationalMode'
+import { answerCountingQuery } from './src/CrucibleEngine/countingVerifier'
 import { readScratch } from './src/CrucibleEngine/agent/taskScratchpad'
 import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools'
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
@@ -1880,6 +1881,29 @@ app.post('/api/chat', async (req, res) => {
 
   // Instant first token — client shows "Analyzing…" immediately, before any model work
   send({ type: 'thinking' })
+
+  // ── Layer 0 — Deterministic counting gate ─────────────────────────────────────
+  // "how many r's in strawberry" style questions are pure arithmetic, not
+  // generation. Free/local models routinely hallucinate on these — pattern-
+  // completing the previous answer instead of actually counting (see ROADMAP
+  // audit). Runs before A0/M1/full pipeline so it fires even with ensemble off,
+  // costs zero API calls, and is never wrong. "Verify, never guess" applied to
+  // the product itself, not just to our own audits.
+  if (mode !== 'agent' && mode !== 'seeker' && mode !== 'code') {
+    const countAns = answerCountingQuery(message ?? '')
+    if (countAns) {
+      debugBus.emit('pipeline', 'counting_gate', { needle: countAns.needle, haystack: countAns.haystack, count: countAns.count }, { severity: 'success', requestId })
+      send({ type: 'contract', promptType: 'factual', requiredStructure: [], forbiddenAntipatterns: [] })
+      send({ type: 'stage', stage: 1, status: 'start' })
+      send({ type: 'layer1', modelId: 'system/count-verifier', model: 'Crucible (verified)', text: countAns.text, done: true })
+      send({ type: 'stage', stage: 1, status: 'done' })
+      send({ type: 'synthesis', modelId: 'system/count-verifier', model: 'Crucible (verified)', text: countAns.text, done: true, replace: false })
+      send({ type: 'stage', stage: 5, status: 'done' })
+      patchActiveSessionRound(chatUser, chatRoundId, { synthesis: countAns.text, synthesisDone: true, synthStreaming: false })
+      res.write('data: [DONE]\n\n'); res.end()
+      return
+    }
+  }
 
   // ── A0 — Crucible-only path (ensemble opt-out) ────────────────────────────────
   // v3 redesign contract: when the client has NOT opted into the ensemble

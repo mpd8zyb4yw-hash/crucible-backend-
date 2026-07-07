@@ -1346,6 +1346,40 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07 — Deterministic counting gate: fixed hallucinated "how many r's in X" answers
+
+**Bug (user-reported, reproduced end-to-end):** with ensemble off, three chained "how many
+X are in word Y" questions (strawberry, then a nonsense pineapple/strawberries follow-up, then a
+reversed "how many pineapples are in the word r?") all came back tagged `CRUCIBLE · ON-DEVICE`.
+The first ("3 r's in strawberry") happened to be right; every follow-up was pattern-completion
+garbage — the on-device model repeated "three r's" regardless of the actual question, then
+produced "There are 3 pineapples in the word R," which doesn't parse. Root cause: the A0
+ensemble-opt-out path (`server.ts`) sends the raw message straight to `callLocalModel` with zero
+verification — no domain verifier, no counting logic, nothing — because that path is designed to
+never fan out to external providers. Same gap exists in the `triageTier === 'simple'` fast path
+(Stage-5 domain verifiers in `domainVerifiers.ts` only ever ran for the full pipeline).
+
+**Fix, per the free-tier philosophy ("weak output ⇒ more client-side processing, never a premium
+model"):** letter/substring/vowel/consonant counting in a word is 100% computable — there's no
+reason to ask a model to guess at something arithmetic. Added
+`src/CrucibleEngine/countingVerifier.ts` (`answerCountingQuery`), a zero-cost deterministic gate
+matching "how many X are/is in (the word/string/name) Y", "how many times does X appear/occur in
+Y", and "count X in Y", with special-cased `letter(s)`/`vowel(s)`/`consonant(s)` needles. Wired in
+as a new **Layer 0** in `server.ts`, before A0/M1/the full pipeline, so it fires regardless of
+ensemble on/off or mode, and costs zero API calls. Deliberately conservative: the "X are/is in Y"
+template only fires marker-free (no "the word/string/name") when the needle is unambiguously a
+single letter (e.g. `r's`) — otherwise it would hijack real quantity questions like "how many
+calories are in a banana." Verified with the server running (`npm install --ignore-scripts` +
+`npm rebuild better-sqlite3` to work around the sandboxed sharp download failure) against all
+three reported queries (now correct: 3 r's in strawberry; 0 "strawberries" in "pineapple"; 0
+"pineapples" in "r") and against a calorie/banana control query (falls through to the normal
+pipeline untouched, confirming no false-positive hijack of ordinary questions).
+
+**Still open:** this closes the specific counting-hallucination class, not weak on-device output
+in general — the A0/simple-tier paths still have no verification for other prompt types. If this
+recurs for a different query shape, extend `domainVerifiers.ts`'s router (Stage 5b) to also run
+against the A0/simple-tier single-model answers, not just the full pipeline.
+
 ### 2026-07-06 — Resolved v3 UI redesign's canonical-repo question; set up two-agent port plan
 
 A separate repo (`mpd8zyb4yw-hash/Crucible-Code`) held a Claude Design handoff bundle whose
