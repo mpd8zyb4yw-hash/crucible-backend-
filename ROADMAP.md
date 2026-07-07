@@ -1346,6 +1346,32 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07g — Tool builder wired into chat + frontend builder card (item 2 complete on the happy path)
+
+Completes the wiring left open in 07f — the builder is now reachable end-to-end from chat:
+
+- **server.ts `/api/chat`**: new early-return before the agent branch — `detectBuildRequest()`
+  (deterministic, null-on-doubt) routes "build me a tool that…" to `startBuilder()`, emits a
+  `builder_session` SSE event with the full session view plus a `final` text (restatement +
+  first clarifying question), then closes the stream. Opt-out via `builderMode: false`.
+- **src/App.tsx**: `Round.builder` + `BuilderView` interface; SSE handler for
+  `builder_session` (with a builder-round `final` intercept so agent state is never
+  fabricated for builder rounds); new `BuilderCard` component rendered per round — status
+  header (clarifying / draft ready **not yet verified** / dry run passed / installed /
+  failed), restatement, draft summary with trigger aliases, one-at-a-time question input,
+  dry-run transcript (per-step args + ok/fail + output, monospace, overflowX-scrollable),
+  and an install button that only exists in the DOM when the server reports `verified`
+  (server refuses anyway — double gate). No emojis; wordBreak everywhere; flexWrap
+  layouts sized for narrow and wide (inputs `flex: 1 1 160px; minWidth: 0`).
+- Verified: frontend `tsc -p tsconfig.app.json --noEmit` clean; live `/api/chat` POST with
+  a build phrase confirmed the branch fires (SSE `final` + `[DONE]`, pipeline untouched) —
+  this box has no provider keys, so the model call inside errors as expected; the
+  model-backed portion of the flow is covered by 07f's 18-assertion scripted test whose
+  session shape matches `BuilderView` field-for-field.
+- Still open before calling item 2 fully `[x]`: one real model-backed end-to-end run in a
+  keyed environment (chat → card → clarify → dry run → install), and a visual pass on
+  phone + desktop widths.
+
 ### 2026-07-07f — Natural-language tool builder API with mandatory dry-run gate (design-spec item 2)
 
 `[~]` **Backend complete and verified; chat-pipeline/UI wiring not yet done** — nothing calls

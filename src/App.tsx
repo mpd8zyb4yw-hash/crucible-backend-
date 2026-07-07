@@ -303,6 +303,21 @@ interface Round {
   animaTruths?: Array<{ observation: string; domain: string; confidencePct: number; confirmingInstances: number; fragility: string }>
   // Confidence-gated response commitment (low-confidence factual/reasoning answers)
   uncertainCommitment?: { overallScore: number; resolvingStep: string }
+  // Natural-language tool builder session ("build me a tool that…")
+  builder?: BuilderView | null
+}
+
+// ── Tool builder (design spec §2) — session state mirrored from /api/builder/* ─
+interface BuilderView {
+  id: string
+  status: 'clarifying' | 'drafted' | 'verified' | 'installed' | 'failed'
+  request: string
+  restatement: string
+  currentQuestion: string | null
+  answers: Array<{ question: string; answer: string }>
+  draft: { name: string; description: string; kind: string; triggerAliases: string[] } | null
+  dryRun: { passed: boolean; transcript: Array<{ args: Record<string, unknown>; ok: boolean; output: string }>; error?: string } | null
+  error?: string
 }
 
 // ── Agent state (Section 7) — one reducer over the agent SSE event stream ─────
@@ -1237,6 +1252,137 @@ function CollapsibleCode({ language, code }: { language: string; code: string })
   )
 }
 
+// ── Tool builder card — drives /api/builder/* for one session ────────────────
+// The install button only exists in the DOM when the server says status is
+// 'verified'; the server refuses installs without a passed dry run anyway, so the
+// UI can never even appear to install unverified work.
+function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: BuilderView) => void }) {
+  const [answer, setAnswer] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const call = async (path: string, body: Record<string, unknown>, label: string) => {
+    setBusy(label); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/builder/${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: view.id, ...body }),
+      })
+      const data = await r.json()
+      if (!r.ok) { setError(data.error ?? `${label} failed`); return }
+      onUpdate(data.session)
+      setAnswer('')
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally { setBusy(null) }
+  }
+
+  const statusLabel: Record<BuilderView['status'], string> = {
+    clarifying: 'clarifying scope',
+    drafted: 'draft ready - not yet verified',
+    verified: 'dry run passed - ready to install',
+    installed: 'installed',
+    failed: 'build failed',
+  }
+  const statusColor: Record<BuilderView['status'], string> = {
+    clarifying: '#7c7cf8', drafted: '#fbbf24', verified: '#4ade80', installed: '#4ade80', failed: '#f87171',
+  }
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600, letterSpacing: '0.04em',
+    border: '1px solid rgba(124,124,248,0.35)', background: enabled ? 'rgba(124,124,248,0.15)' : 'rgba(124,124,248,0.05)',
+    color: enabled ? '#c9c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+    transition: 'background 0.15s ease-in-out',
+  })
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(124,124,248,0.18)', borderRadius: 12, padding: 12,
+      background: 'rgba(124,124,248,0.04)', display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: statusColor[view.status], flexWrap: 'wrap' as const }}>
+        <span>tool builder</span>
+        <span style={{ color: '#555' }}>·</span>
+        <span>{statusLabel[view.status]}</span>
+        {busy && <span style={{ color: '#888', textTransform: 'none' as const, letterSpacing: 0 }}>· {busy}…</span>}
+      </div>
+
+      {view.restatement && (
+        <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>{view.restatement}</div>
+      )}
+
+      {view.draft && (
+        <div style={{ fontSize: 11.5, color: '#999', display: 'flex', flexDirection: 'column', gap: 3, wordBreak: 'break-word' as const }}>
+          <div><span style={{ color: '#7c7cf8' }}>{view.draft.name}</span> — {view.draft.description}</div>
+          {view.draft.triggerAliases.length > 0 && (
+            <div style={{ color: '#666' }}>also responds to: {view.draft.triggerAliases.join(' · ')}</div>
+          )}
+        </div>
+      )}
+
+      {view.answers.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#777' }}>
+          {view.answers.map((a, i) => (
+            <div key={i} style={{ wordBreak: 'break-word' as const }}>{a.question} <span style={{ color: '#aaa' }}>{a.answer}</span></div>
+          ))}
+        </div>
+      )}
+
+      {view.status === 'clarifying' && view.currentQuestion && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 12.5, color: '#ddd', wordBreak: 'break-word' as const }}>{view.currentQuestion}</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+            <input
+              value={answer} onChange={e => setAnswer(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && answer.trim() && !busy) call('reply', { answer }, 'answering') }}
+              placeholder="your answer"
+              style={{ flex: '1 1 160px', minWidth: 0, padding: '6px 10px', borderRadius: 8, fontSize: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(124,124,248,0.25)', color: '#ddd', outline: 'none' }}
+            />
+            <button disabled={!answer.trim() || !!busy} onClick={() => call('reply', { answer }, 'answering')} style={btn(!!answer.trim() && !busy)}>answer</button>
+          </div>
+        </div>
+      )}
+
+      {(view.status === 'drafted' || view.status === 'verified') && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+          <button disabled={!!busy} onClick={() => call('dryrun', {}, 'dry running')} style={btn(!busy)}>
+            {view.dryRun ? 'run dry run again' : 'run dry run'}
+          </button>
+          {view.status === 'verified' && (
+            <button disabled={!!busy} onClick={() => call('install', {}, 'installing')} style={btn(!busy)}>install</button>
+          )}
+          {view.status === 'drafted' && (
+            <span style={{ fontSize: 10.5, color: '#888' }}>install unlocks after a passing dry run</span>
+          )}
+        </div>
+      )}
+
+      {view.dryRun && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: view.dryRun.passed ? '#4ade80' : '#f87171' }}>
+            dry run {view.dryRun.passed ? 'passed' : 'failed'}
+          </div>
+          {view.dryRun.transcript.map((t, i) => (
+            <div key={i} style={{ fontSize: 11, fontFamily: 'ui-monospace, monospace', background: 'rgba(0,0,0,0.25)', borderRadius: 8, padding: '6px 8px', overflowX: 'auto' as const }}>
+              <div style={{ color: '#888', wordBreak: 'break-all' as const }}>args: {JSON.stringify(t.args)}</div>
+              <div style={{ color: t.ok ? '#4ade80' : '#f87171', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>{t.ok ? 'ok' : 'fail'} - {t.output}</div>
+            </div>
+          ))}
+          {view.dryRun.error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.dryRun.error}</div>}
+        </div>
+      )}
+
+      {view.status === 'installed' && view.draft && (
+        <div style={{ fontSize: 12, color: '#4ade80' }}>
+          {view.draft.name} is installed and available in every session. Say "make {view.draft.name} …" style requests any time to refine it; every change is versioned and reversible.
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+    </div>
+  )
+}
+
 function AgentPanel({ agent }: { agent: AgentState }) {
   const verifyByLatest = agent.verifies[agent.verifies.length - 1]
   return (
@@ -2127,6 +2273,7 @@ export default function App() {
   const consumeStream = async (reader: ReadableStreamDefaultReader<Uint8Array>, roundId: string, userMessage: string) => {
     const decoder = new TextDecoder()
     let sseBuf = ''
+    let builderRound = false   // set when the server routes this round to the tool builder
 
     while (true) {
       const { done, value } = await reader.read()
@@ -2141,6 +2288,18 @@ export default function App() {
         if (raw === '[DONE]') break
         try {
           const parsed = JSON.parse(raw)
+
+          // ── Tool builder session — round becomes a builder card ────────────
+          if (parsed.type === 'builder_session') {
+            builderRound = true
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, builder: parsed.session }))
+            continue
+          }
+          if (builderRound && parsed.type === 'final') {
+            // Builder rounds have no agent state — take the text directly.
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, synthesis: parsed.text ?? '', synthesisDone: true }))
+            continue
+          }
 
           // ── Agent loop events (Section 7) — fold through one reducer ────────
           if (AGENT_EVENT_TYPES.has(parsed.type)) {
@@ -3465,6 +3624,12 @@ export default function App() {
 
               {/* Agent loop panel (Section 7) */}
               {round.agent && <AgentPanel agent={round.agent} />}
+              {round.builder && (
+                <BuilderCard
+                  view={round.builder}
+                  onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, builder: s }))}
+                />
+              )}
 
               {/* Pipeline Theater — all model cards, shown when user message is clicked */}
               {round.expandedModel && <PipelineTheater round={round} />}

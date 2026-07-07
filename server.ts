@@ -44,7 +44,7 @@ import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleE
 import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory, readGlobalMemoryDigest, globalMemoryFile } from './src/CrucibleEngine/state/session'
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
 import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
-import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView } from './src/CrucibleEngine/toolBuilder'
+import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -1615,6 +1615,37 @@ app.post('/api/chat', async (req, res) => {
     }
   }
   console.log('[/api/chat] Received:', message?.slice(0, 80), '| mode:', mode, '| device:', device)
+
+  // ── Tool builder capture (design spec §2.1 step 1) ──────────────────────────
+  // "build me a tool that…" opens a builder session instead of the pipeline. The
+  // detector is deterministic and high-precision (null-on-doubt), so normal chat
+  // never lands here by accident. The frontend drives the rest of the flow
+  // (clarify → dry run → install) through /api/builder/*.
+  if (req.body.builderMode !== false && detectBuildRequest(message ?? '')) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    const send = (payload: object) => {
+      const line = `data: ${JSON.stringify(payload)}\n\n`
+      res.write(line)
+      if (chatSessionId) broadcastEvent(chatSessionId, line, res)
+    }
+    try {
+      const s = await startBuilder(String(message), builderCallModel)
+      const view = builderSessionView(s)
+      send({ type: 'builder_session', session: view })
+      const intro = view.currentQuestion
+        ? `${s.restatement}\n\nBefore I draft it: ${view.currentQuestion}`
+        : `${s.restatement}\n\nDraft ready — run the dry run to see it work before installing.`
+      send({ type: 'final', text: intro })
+      if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
+    } catch (e: any) {
+      send({ type: 'final', text: `Could not start the tool builder: ${e?.message ?? e}` })
+    }
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
 
   // ── Agent mode — sustained tool loop instead of the synthesis pipeline ─────
   if (mode === 'agent' || mode === 'seeker' || (mode === 'code' && detectAgentTask(message ?? '')) || (req.body.agentMode !== false && detectAgentTask(message ?? '') && !isCreativeProse(message ?? ''))) {
