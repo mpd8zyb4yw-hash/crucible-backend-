@@ -1346,6 +1346,40 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07 — UI audit + polish pass on `src/App.tsx` (branch `claude/crucible-ui-audit-redesign-pefnpf`)
+
+Full UI audit against the user's bug/change list. Note: several reported behaviors (lava/molten
+pour around chat boxes, GPTOSS chip, agents/skills/tools sidebar, blue circle bottom-left,
+"0 external calls" chip, bottom "brightness-looking" settings icon, offline "strict mode blocks
+external escalation" timeout message) do **not exist in this repo's frontend** — they belong to
+the greenfield `Crucible-Code` reference app (see 2026-07-06 entry). Those items must be fixed
+there or during the planned port; they are recorded here so they aren't lost.
+
+Changes landed in this repo:
+- **Typing latency fixed** — mode-classification regexes + pre-warm moved off the keystroke
+  path into one 300ms debounce; textarea autosize no longer double-rAFs; ShimmerBg throttled
+  to ~20fps, pauses when hidden, reduced to two low-alpha washes (calmer "orbs").
+- **Pipeline log overlay (bottom-right) removed** — signal already lives in the process trail.
+- **Double bottom backdrop-blur veil collapsed to one layer** — half the compositing cost,
+  removes the visible seam/"gap" where the two blur layers met behind the input bar.
+- **Feedback votes are changeable** — tap again to clear, tap the other to switch.
+- **Redundant third copy button removed** — answer card keeps one copy (top-right, copies the
+  answer, not the whole exchange).
+- **Nested-code scroll reset fixed** — `CollapsibleCode` memoized (SyntaxHighlighter rebuilt its
+  DOM every render) and chat auto-scroll now only follows during active generation / new rounds,
+  never on idle state mutations (votes, critique toggles, session merges).
+- **iMessage-style exchange** — user bubbles right with a tail radius; answer cards anchor left
+  (max 94% width, asymmetric radius); full-bleed preserved on mobile.
+- **Empty state** — "Dynamic models. One answer." replaced with a quiet CrucibleMark + wordmark.
+- **Chat-bar cleanup** — "Ensemble" pill renamed "Auto"; new "+" quick-actions menu (new
+  conversation, dictation via Web Speech API, run-as-agent-task).
+- **Settings affordance** — hamburger replaced with a gear icon (44px touch target kept).
+- **Topbar** — 52px tall / 84px left pad so nothing sits under macOS traffic lights.
+
+Still open (backend, not UI): offline/agent response timeouts need a keep-working-until-done
+policy instead of a hard timeout + refusal; GitHub/open-source tool discovery for the agent;
+novice-friendly skills surfacing. These belong in `server.ts` / agent loop work.
+
 ### 2026-07-06 — Resolved v3 UI redesign's canonical-repo question; set up two-agent port plan
 
 A separate repo (`mpd8zyb4yw-hash/Crucible-Code`) held a Claude Design handoff bundle whose

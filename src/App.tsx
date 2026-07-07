@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { API_BASE, apiFetch } from './api'
 import CrucibleMark from './CrucibleMark'
 import './modelData'
@@ -35,7 +35,7 @@ const MODES = [
 type Mode = typeof MODES[number]['id']
 
 const MODE_META: Record<string, { label: string; hint: string; color: string }> = {
-  quorum: { label: 'Ensemble', hint: 'Multi-model pipeline', color: '#7c7cf8' },
+  quorum: { label: 'Auto', hint: 'Multi-model pipeline', color: '#7c7cf8' },
   code:   { label: 'Code',     hint: 'Dev-optimised',       color: '#4db89e' },
   seeker: { label: 'Search',   hint: 'Web-augmented',       color: '#f59e0b' },
 }
@@ -203,14 +203,18 @@ function CopyButton({ text, inline = false, title = 'Copy' }: { text: string; in
 
 function FeedbackButtons({ query, synthesis, promptType }: { query: string; synthesis: string; promptType: string }) {
   const [voted, setVoted] = useState<'up' | 'down' | null>(null)
+  // Votes are always changeable — tapping the same button again clears it,
+  // tapping the other one switches it. The latest vote wins server-side.
   const vote = (v: 'up' | 'down') => {
-    if (voted) return
-    setVoted(v)
-    apiFetch('/api/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, synthesis, vote: v, promptType }),
-    }).catch(() => {})
+    const next = voted === v ? null : v
+    setVoted(next)
+    if (next) {
+      apiFetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, synthesis, vote: next, promptType }),
+      }).catch(() => {})
+    }
   }
   return (
     <div style={{ display: 'flex', gap: 2 }}>
@@ -221,7 +225,7 @@ function FeedbackButtons({ query, synthesis, promptType }: { query: string; synt
           title={v === 'up' ? 'Good answer' : 'Bad answer'}
           style={{
             background: voted === v ? (v === 'up' ? 'rgba(77,184,158,0.15)' : 'rgba(248,124,124,0.12)') : 'none',
-            border: 'none', cursor: voted ? 'default' : 'pointer',
+            border: 'none', cursor: 'pointer',
             padding: '3px 5px', borderRadius: 5,
             color: voted === v ? (v === 'up' ? '#4db89e' : '#f87c7c') : 'rgba(255,255,255,0.18)',
             transition: 'color 0.15s, background 0.15s',
@@ -404,30 +408,34 @@ function ShimmerBg({ thinking, mode }: { thinking: boolean; mode: string }) {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')!
-    let animId: number, t = 0
+    let animId: number, t = 0, lastDraw = 0
     const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight }
     resize(); window.addEventListener('resize', resize)
-    const draw = () => {
-      t += 0.003; ctx.clearRect(0, 0, canvas.width, canvas.height)
+    // Calmer + cheaper ambience: two large, very-low-alpha washes instead of three
+    // saturated orbs; throttled to ~20fps and paused when the tab is hidden, so it
+    // adds depth without reading as "glowing orbs" or costing typing responsiveness.
+    const draw = (now: number) => {
+      animId = requestAnimationFrame(draw)
+      if (document.hidden || now - lastDraw < 50) return
+      lastDraw = now
+      t += 0.0012; ctx.clearRect(0, 0, canvas.width, canvas.height)
       // base hue per mode: quorum=255 (violet), code=165 (teal), seeker=38 (amber)
       const modeBase = modeRef.current === 'code' ? 165 : modeRef.current === 'seeker' ? 38 : 255
       const blobs = [
-        { x: 0.15, y: 0.35, r: 0.30, h: modeBase + Math.sin(t) * 20 },
-        { x: 0.85, y: 0.55, r: 0.25, h: modeBase - 60 + Math.cos(t * 1.3) * 15 },
-        { x: 0.50, y: 0.80, r: 0.22, h: modeBase + 45 + Math.sin(t * 0.8) * 25 },
+        { x: 0.18 + Math.sin(t) * 0.02, y: 0.28, r: 0.55, h: modeBase },
+        { x: 0.82 + Math.cos(t * 1.2) * 0.02, y: 0.75, r: 0.50, h: modeBase - 45 },
       ]
-      const alpha = ref.current ? 0.05 : 0.035
+      const alpha = ref.current ? 0.045 : 0.028
       blobs.forEach(b => {
         const x = b.x * canvas.width, y = b.y * canvas.height
         const r = b.r * Math.min(canvas.width, canvas.height)
         const g = ctx.createRadialGradient(x, y, 0, x, y, r)
-        g.addColorStop(0, `hsla(${b.h},70%,60%,${alpha * 2.2})`)
-        g.addColorStop(1, `hsla(${b.h},70%,60%,0)`)
+        g.addColorStop(0, `hsla(${b.h},55%,58%,${alpha * 1.8})`)
+        g.addColorStop(1, `hsla(${b.h},55%,58%,0)`)
         ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill()
       })
-      animId = requestAnimationFrame(draw)
     }
-    draw()
+    animId = requestAnimationFrame(draw)
     return () => { cancelAnimationFrame(animId); window.removeEventListener('resize', resize) }
   }, [])
   return <canvas ref={canvasRef} style={{ position: 'fixed', inset: 0, zIndex: 0, pointerEvents: 'none' }} />
@@ -1199,8 +1207,10 @@ function HistoryBinder({ onRestore }: { onRestore: (session: HistorySession) => 
   )
 }
 
-// Collapsible code block — collapsed by default on mobile, always expanded on desktop
-function CollapsibleCode({ language, code }: { language: string; code: string }) {
+// Collapsible code block — collapsed by default on mobile, always expanded on desktop.
+// Memoized: SyntaxHighlighter rebuilds its whole DOM on every render, which reset the
+// block's internal scroll position whenever anything else in the round updated.
+const CollapsibleCode = React.memo(function CollapsibleCode({ language, code }: { language: string; code: string }) {
   const lineCount = code.split('\n').length
   const [expanded, setExpanded] = useState(false)
   return (
@@ -1235,7 +1245,7 @@ function CollapsibleCode({ language, code }: { language: string; code: string })
       </div>
     </div>
   )
-}
+})
 
 function AgentPanel({ agent }: { agent: AgentState }) {
   const verifyByLatest = agent.verifies[agent.verifies.length - 1]
@@ -1643,9 +1653,12 @@ export default function App() {
     return lastMode ?? 'quorum'
   }
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  // "+" quick-actions menu in the input bar (new chat, dictation, agent task)
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const [dictating, setDictating] = useState(false)
+  const recogRef = useRef<any>(null)
   const [showMinLengthTip, setShowMinLengthTip] = useState(false)
   const minLengthTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [feedHovered, setFeedHovered] = useState(false)
   // N1 — governance panel
   const [govPanelOpen, setGovPanelOpen] = useState(false)
   const [govRequests, setGovRequests] = useState<any[]>([])
@@ -1734,19 +1747,27 @@ export default function App() {
     el.scrollTop = el.scrollHeight
   }
 
+  const prevRoundCountRef = useRef(0)
   useEffect(() => {
     // Guard reads from the ref — always current, never stale.
     if (scrollLockedRef.current) return
     const el = scrollRef.current
     if (!el) return
-    // Use rAF so the scroll happens after the browser has painted the new content,
-    // preventing the layout-recalculation jitter caused by setting scrollTop
-    // synchronously while React is still committing DOM mutations.
+    // Only auto-follow while an answer is actively generating, or when a new round
+    // is added. Following on EVERY rounds mutation (votes, critique toggles, session
+    // merges) yanked the view — and reset any scroll position inside nested code
+    // blocks — while the user was reading a finished answer.
+    const isNewRound = rounds.length !== prevRoundCountRef.current
+    prevRoundCountRef.current = rounds.length
+    const last = rounds[rounds.length - 1]
+    const generating = thinking || (!!last && !last.synthesisDone && !!last.userMessage)
+    if (!isNewRound && !generating) return
+    // rAF so the scroll happens after the browser has painted the new content.
     requestAnimationFrame(() => {
       if (scrollLockedRef.current) return
       el.scrollTop = el.scrollHeight
     })
-  }, [rounds, inputBarHeight])
+  }, [rounds, inputBarHeight, thinking])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1765,13 +1786,38 @@ export default function App() {
   }, [rounds])
 
 
-  // Dismiss mode fan on outside tap
+  // Dismiss mode fan / plus menu on outside tap
   useEffect(() => {
-    if (!modeMenuOpen) return
-    const handler = () => setModeMenuOpen(false)
+    if (!modeMenuOpen && !plusMenuOpen) return
+    const handler = () => { setModeMenuOpen(false); setPlusMenuOpen(false) }
     window.addEventListener('pointerdown', handler)
     return () => window.removeEventListener('pointerdown', handler)
-  }, [modeMenuOpen])
+  }, [modeMenuOpen, plusMenuOpen])
+
+  // ── Dictation (Web Speech API, no-op where unsupported) ───────────────────
+  const toggleDictation = () => {
+    if (dictating) {
+      recogRef.current?.stop()
+      return
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) return
+    const rec = new SR()
+    rec.continuous = true
+    rec.interimResults = false
+    rec.onresult = (e: any) => {
+      let text = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) text += e.results[i][0].transcript
+      }
+      if (text) setInput(prev => (prev ? prev + ' ' : '') + text.trim())
+    }
+    rec.onend = () => { setDictating(false); recogRef.current = null }
+    rec.onerror = () => { setDictating(false); recogRef.current = null }
+    recogRef.current = rec
+    setDictating(true)
+    try { rec.start() } catch { setDictating(false); recogRef.current = null }
+  }
 
   // ── Live agent timer ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -2777,24 +2823,25 @@ export default function App() {
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
     setInput(val)
-    setMode(classifyMode(val, mode))
+    // Keystroke path stays minimal: setInput + height. Everything heavier
+    // (mode classification regexes, pre-warm fetch, min-length tip) is debounced —
+    // per-keystroke work was the source of visible typing latency.
     const ta = e.target
-    requestAnimationFrame(() => {
-      ta.style.height = 'auto'
-      ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'
-    })
+    ta.style.height = 'auto'
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'
     if (minLengthTimer.current) clearTimeout(minLengthTimer.current)
     if (val.trim().length > 0 && val.trim().length < 4) {
       minLengthTimer.current = setTimeout(() => setShowMinLengthTip(true), 800)
-    } else {
+    } else if (showMinLengthTip) {
       setShowMinLengthTip(false)
     }
 
-    // ── Predictive pre-warm ───────────────────────────────────────────────
+    // ── Debounced: mode classification + predictive pre-warm ──────────────
     if (prewarmDebounceRef.current) clearTimeout(prewarmDebounceRef.current)
-    const wordCount = val.trim().split(/\s+/).filter(Boolean).length
-    if (wordCount >= 4 && !thinking) {
-      prewarmDebounceRef.current = setTimeout(() => {
+    prewarmDebounceRef.current = setTimeout(() => {
+      setMode(m => classifyMode(val, m))
+      const wordCount = val.trim().split(/\s+/).filter(Boolean).length
+      if (wordCount >= 4 && !thinking) {
         const token = Date.now().toString()
         prewarmTokenRef.current = token
         apiFetch(`${API_BASE}/api/prewarm`, {
@@ -2802,8 +2849,8 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: val.trim(), token }),
         }).catch(() => {})
-      }, 400)
-    }
+      }
+    }, 300)
   }
   const stop = () => {
     if (abortRef.current) abortRef.current.abort()
@@ -2992,7 +3039,9 @@ export default function App() {
 
       {/* ── Top bar ── */}
       <div className="crucible-topbar" style={{
-        height: 40, display: 'flex', alignItems: 'center', padding: '0 16px 0 80px',
+        // 52px tall + 84px left padding keeps every control clear of the macOS
+        // traffic-light buttons (hiddenInset title bar) at the top left.
+        height: 52, display: 'flex', alignItems: 'center', padding: '0 16px 0 84px',
         background: 'transparent', flexShrink: 0,
         justifyContent: 'space-between', zIndex: 10, position: 'relative',
         WebkitAppRegion: 'drag',
@@ -3112,22 +3161,18 @@ export default function App() {
               }
               setRounds(prev => [...prev, restored])
             }} />
-<button className="crucible-menu-btn" onClick={() => setMenuOpen(o => !o)} style={{
+<button className="crucible-menu-btn" onClick={() => setMenuOpen(o => !o)} title="Settings" aria-label="Settings" style={{
             background: 'none', border: 'none', cursor: 'pointer',
-            color: '#555', padding: '6px 8px', borderRadius: 8,
-            display: 'flex', flexDirection: 'column', gap: 3.5, alignItems: 'center', justifyContent: 'center',
+            color: menuOpen ? '#fff' : govPending > 0 ? 'rgba(255,180,80,0.8)' : '#555',
+            padding: '6px 8px', borderRadius: 8,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'color 0.2s',
           }}>
-            {[0,1,2].map(i => (
-              <span key={i} style={{
-                display: 'block',
-                width: 16,
-                height: 1.5,
-                borderRadius: 2,
-                background: menuOpen ? '#fff' : govPending > 0 ? 'rgba(255,180,80,0.7)' : '#555',
-                transition: 'background 0.2s',
-                animation: govPending > 0 && !menuOpen ? 'amberBreath 2.4s ease-in-out infinite' : 'none',
-              }} />
-            ))}
+            {/* Gear — toothed cog outline so it can't be mistaken for a brightness/sun icon */}
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
           </button>
           {menuOpen && (
             <div style={{
@@ -3427,8 +3472,9 @@ export default function App() {
         maskImage: `linear-gradient(to bottom, black 0%, black calc(100% - ${inputBarHeight - 8}px), rgba(0,0,0,0.92) calc(100% - ${inputBarHeight - 32}px), rgba(0,0,0,0.55) calc(100% - ${inputBarHeight - 68}px), rgba(0,0,0,0.18) calc(100% - ${Math.max(20, inputBarHeight - 103)}px), transparent 100%)`,
       }}>
         {rounds.length === 0 && (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.18)', letterSpacing: '0.06em', fontWeight: 500 }}>Dynamic models. One answer.</span>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, opacity: 0.75 }}>
+            <CrucibleMark thinking={false} done={false} />
+            <span style={{ fontSize: 15, color: 'rgba(228,228,248,0.55)', fontWeight: 600, letterSpacing: '-0.01em' }}>Crucible</span>
           </div>
         )}
 
@@ -3448,7 +3494,7 @@ export default function App() {
                   ))}
                   className="crucible-user-bubble"
                   style={{
-                    maxWidth: '62%', padding: '9px 14px', borderRadius: 14,
+                    maxWidth: '62%', padding: '9px 14px', borderRadius: '14px 6px 14px 14px',
                     fontSize: 13, lineHeight: 1.58, cursor: models.length > 0 ? 'pointer' : 'default',
                     background: round.expandedModel ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.055)',
                     border: `1px solid ${round.expandedModel ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.09)'}`,
@@ -3522,8 +3568,12 @@ export default function App() {
 
               {/* Synthesis */}
               {round.synthesis.length > 0 && (
-                <div style={{
-                  position: 'relative', borderRadius: 14, padding: '16px 18px', width: '100%', boxSizing: 'border-box' as const, overflow: 'hidden',
+                <div className="crucible-answer-card" style={{
+                  // Conversation reads like a real exchange: user bubbles hug the right,
+                  // answers anchor left with an asymmetric "tail" radius.
+                  position: 'relative', borderRadius: '6px 14px 14px 14px', padding: '16px 18px',
+                  width: 'auto', maxWidth: '94%', minWidth: '60%', alignSelf: 'flex-start',
+                  boxSizing: 'border-box' as const, overflow: 'hidden',
                   background: 'linear-gradient(135deg, rgba(124,124,248,0.07) 0%, rgba(77,184,158,0.05) 50%, rgba(192,132,252,0.07) 100%)',
                   backdropFilter: 'blur(28px)', WebkitBackdropFilter: 'blur(28px)',
                   border: '1px solid rgba(255,255,255,0.1)',
@@ -3534,7 +3584,7 @@ export default function App() {
                 }}>
                   {round.synthesisDone && (
                     <div style={{ position: 'absolute', top: 12, right: 14, zIndex: 2 }}>
-                      <CopyButton text={`${round.userMessage}\n\n${round.synthesis}`} inline title="Copy full exchange" />
+                      <CopyButton text={round.synthesis} inline title="Copy answer" />
                     </div>
                   )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 0, flexWrap: 'wrap' as const, paddingRight: 28 }}>
@@ -3664,9 +3714,9 @@ export default function App() {
 
                    return (
                      <>
-                       {/* Copy + feedback — between answer and process trail */}
+                       {/* Feedback — the answer's copy button lives in the card corner;
+                           a third copy here was redundant. */}
                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-                         <CopyButton text={round.synthesis} inline title="Copy answer" />
                          <FeedbackButtons query={round.userMessage} synthesis={round.synthesis} promptType={round.promptType} />
                        </div>
 
@@ -3924,102 +3974,19 @@ export default function App() {
       </div>
 
 
-      {/* ── Pipeline Log Overlay ── */}
-      {(() => {
-        const feed = latestRound?.activityFeed ?? []
-        if (feed.length === 0 && !thinking) return null
-        const isOpen = feedHovered || thinking
-        return (
-          <div
-            className="crucible-pipeline-log"
-            onMouseEnter={() => setFeedHovered(true)}
-            onMouseLeave={() => setFeedHovered(false)}
-            style={{
-              position: 'fixed',
-              bottom: 18,
-              right: 12,
-              zIndex: 20,
-              width: isOpen ? 'clamp(64px, calc((100vw - 688px) / 2 - 16px), 280px)' : 64,
-              maxWidth: isOpen ? 280 : 64,
-              minWidth: 64,
-              borderRadius: 14,
-              background: isOpen ? 'rgba(10,10,18,0.82)' : 'rgba(10,10,18,0.28)',
-              backdropFilter: 'blur(20px)',
-              WebkitBackdropFilter: 'blur(20px)',
-              border: '1px solid rgba(255,255,255,0.08)',
-              overflow: 'hidden',
-              transition: 'width 0.6s cubic-bezier(0,0,0.2,1), background 1.8s cubic-bezier(0,0,0.2,1), opacity 2s cubic-bezier(0,0,0.2,1)',
-              opacity: isOpen ? 1 : 0.55,
-              cursor: 'pointer',
-            }}
-          >
-            {/* Collapsed label — always visible */}
-            {!isOpen && (
-              <div style={{
-                padding: '8px 6px',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <span style={{ fontSize: 8, letterSpacing: '0.12em', color: 'rgba(255,255,255,0.4)', fontWeight: 700 }}>LOG</span>
-              </div>
-            )}
-            {/* Expanded content */}
-            {isOpen && (
-              <div style={{ display: 'flex', flexDirection: 'column' as const }}>
-                <div style={{
-                  padding: '5px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  borderBottom: '1px solid rgba(255,255,255,0.05)',
-                }}>
-                  <span style={{ fontSize: 8, letterSpacing: '0.12em', color: 'rgba(255,255,255,0.35)', fontWeight: 700 }}>PIPELINE LOG</span>
-                  <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)' }}>{feed.length}</span>
-                </div>
-                <div style={{
-                  maxHeight: 160, overflowY: 'auto' as const, overflowX: 'hidden' as const,
-                  padding: '5px 8px', display: 'flex', flexDirection: 'column' as const, gap: 3,
-                }}>
-                  {feed.map((entry, i) => {
-                    const colors: Record<string,string> = { contract:'#7c7cf8', linter:'#4db89e', rollback:'#f87c7c', stage:'rgba(255,255,255,0.3)' }
-                    const color = colors[entry.type] ?? 'rgba(255,255,255,0.3)'
-                    const modelShort = entry.modelId ? entry.modelId.split('/').pop()?.split('-').slice(0,2).join('-') : null
-                    const label = modelShort ? `${modelShort}: ${entry.message}` : entry.message
-                    return (
-                      <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 5, minWidth: 0 }}>
-                        <span style={{ flexShrink: 0, marginTop: 4, width: 3, height: 3, borderRadius: '50%', background: color }} />
-                        <span style={{
-                          fontSize: 9, color: 'rgba(255,255,255,0.42)', lineHeight: 1.5,
-                          overflowWrap: 'break-word' as const, wordBreak: 'break-word' as const, minWidth: 0,
-                        }}>{label}</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-        )
-      })()}
-
-      {/* ── Progressive blur veil — frosted glass that deepens toward the bottom ──
-          Two stacked masked backdrop-blur layers. Each mask fades the blur IN from
-          the top, so content scrolling down gets progressively more blurred the lower
-          it goes — dissolving into a soft frosted ghost behind the model cards. No
-          solid background, so it never reads as a dark bar; the blobs stay visible. */}
+      {/* Pipeline log overlay removed — its signal now lives in the process trail
+          under each answer. One frosted veil (below) replaces the old double-blur
+          stack: a single masked backdrop-blur is half the compositing cost and
+          closes the visual "gap" where the two layers met mid-bar. */}
       <div style={{
         position: 'fixed', bottom: 0,
         left: remoteBrain && isMobile && isLandscape ? '62%' : 0,
         right: 0,
-        height: inputBarHeight - 4, pointerEvents: 'none', zIndex: 8, background: remoteBrain && isMobile ? 'rgba(13,13,21,0.55)' : 'transparent',
-        backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
-        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 64px)',
-        maskImage: 'linear-gradient(to bottom, transparent 0px, black 64px)',
-      }} />
-      <div style={{
-        position: 'fixed', bottom: 0,
-        left: remoteBrain && isMobile && isLandscape ? '62%' : 0,
-        right: 0,
-        height: inputBarHeight - 28, pointerEvents: 'none', zIndex: 9,
-        backdropFilter: 'blur(44px)', WebkitBackdropFilter: 'blur(44px)',
-        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 44px)',
-        maskImage: 'linear-gradient(to bottom, transparent 0px, black 44px)',
+        height: inputBarHeight + 8, pointerEvents: 'none', zIndex: 8,
+        background: remoteBrain && isMobile ? 'rgba(13,13,21,0.55)' : 'transparent',
+        backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)',
+        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0px, black 56px)',
+        maskImage: 'linear-gradient(to bottom, transparent 0px, black 56px)',
       }} />
 
       {/* ── Scroll-to-bottom button (visible only when the user scrolled up) ── */}
@@ -4176,7 +4143,7 @@ export default function App() {
               value={input}
               onChange={handleInput}
               onKeyDown={handleKey}
-              placeholder={!localStorage.getItem('crucible_has_sent') ? 'Crucible can' : 'Message Crucible'}
+              placeholder={dictating ? 'Listening…' : !localStorage.getItem('crucible_has_sent') ? 'Ask anything' : 'Message Crucible'}
               rows={1}
               className="crucible-textarea"
               style={{
@@ -4190,7 +4157,84 @@ export default function App() {
           </div>
 
           {/* ── Row 2: toolbar pills + send button ── */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingTop: 11 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingTop: 11, position: 'relative' }}>
+            {/* "+" quick actions — new chat, dictation, agent task */}
+            <button
+              onPointerDown={e => { e.stopPropagation(); setPlusMenuOpen(o => !o); setModeMenuOpen(false) }}
+              title="Quick actions"
+              aria-label="Quick actions"
+              style={{
+                width: 26, height: 26, borderRadius: '50%', border: 'none', cursor: 'pointer',
+                background: plusMenuOpen ? 'rgba(124,124,248,0.16)' : 'rgba(255,255,255,0.05)',
+                color: plusMenuOpen ? '#a5a5ff' : 'rgba(255,255,255,0.5)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                transition: 'background 0.2s, color 0.2s, transform 0.18s',
+                transform: plusMenuOpen ? 'rotate(45deg)' : 'none',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M6 1.5v9M1.5 6h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            </button>
+            {plusMenuOpen && (
+              <div
+                onPointerDown={e => e.stopPropagation()}
+                style={{
+                  position: 'absolute', bottom: 'calc(100% + 8px)', left: 0, zIndex: 40,
+                  background: 'rgba(17,17,24,0.96)', backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)',
+                  border: '1px solid rgba(255,255,255,0.09)', borderRadius: 12,
+                  padding: '4px 0', minWidth: 190,
+                  boxShadow: '0 12px 40px rgba(0,0,0,0.55)',
+                  animation: 'panelUp 0.16s cubic-bezier(0.22,1,0.36,1)',
+                }}
+              >
+                {[
+                  {
+                    label: 'New conversation',
+                    hint: 'Clear the thread',
+                    disabled: rounds.length === 0,
+                    action: () => { setRounds([]); synthesisRef.current = {} },
+                    icon: <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"><path d="M7 2.5v9M2.5 7h9"/></svg>,
+                  },
+                  {
+                    label: dictating ? 'Stop dictation' : 'Dictate',
+                    hint: dictating ? 'Listening…' : 'Speak instead of typing',
+                    disabled: !((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition),
+                    action: toggleDictation,
+                    icon: <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="1.5" width="4" height="7" rx="2"/><path d="M2.5 7a4.5 4.5 0 0 0 9 0M7 11.5v1.5"/></svg>,
+                  },
+                  {
+                    label: 'Run as agent task',
+                    hint: 'Plan, edit files, verify',
+                    disabled: input.trim().length < 4 || thinking,
+                    action: () => { void send(undefined, 'agent') },
+                    icon: <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><path d="M2 10.5l3.5-3.5L2 3.5M7.5 11.5H12"/></svg>,
+                  },
+                ].map(item => (
+                  <button
+                    key={item.label}
+                    disabled={item.disabled}
+                    onClick={() => { if (!item.disabled) { item.action(); setPlusMenuOpen(false); haptic('light') } }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                      padding: '9px 14px', background: 'none', border: 'none',
+                      cursor: item.disabled ? 'default' : 'pointer',
+                      color: item.disabled ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.6)',
+                      textAlign: 'left' as const, transition: 'background 0.15s, color 0.15s',
+                    }}
+                    onMouseEnter={e => { if (!item.disabled) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.9)' } }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = item.disabled ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.6)' }}
+                  >
+                    <span style={{ flexShrink: 0, opacity: 0.7, color: item.label === 'Stop dictation' ? '#f87171' : 'currentColor' }}>{item.icon}</span>
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <span style={{ fontSize: 12, fontWeight: 500 }}>{item.label}</span>
+                      <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.22)' }}>{item.hint}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Mode selector — Studio toggle is nested inside its expansion fan */}
             <ModeSwitcher mode={mode} setMode={setMode} modeMenuOpen={modeMenuOpen} setModeMenuOpen={setModeMenuOpen} />
 

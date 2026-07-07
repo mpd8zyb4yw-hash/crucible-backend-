@@ -124,6 +124,13 @@ html, body, #root {
     max-width: 88% !important;
   }
 
+  /* Answer card: full-bleed on phones — the left/right split needs desktop width */
+  .crucible-answer-card {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
   /* Input bar container: hug the safe-area bottom.
      12px sides to match the .crucible-scroll message gutter (no 2px stagger). */
   .crucible-inputbar-wrap {
