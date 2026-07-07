@@ -305,6 +305,21 @@ interface Round {
   uncertainCommitment?: { overallScore: number; resolvingStep: string }
   // Natural-language tool builder session ("build me a tool that…")
   builder?: BuilderView | null
+  // Tool refinement session ("make <tool> less chatty")
+  refine?: RefineView | null
+}
+
+// ── Tool refinement (design spec §4) — session state from /api/refine/* ───────
+interface RefineView {
+  id: string
+  status: 'proposed' | 'verified' | 'applied' | 'failed'
+  toolName: string
+  fromVersion: number
+  instruction: string
+  explanation: string
+  diffs: Array<{ field: string; old: string; new: string }>
+  smoke: { passed: boolean; steps: Array<{ args: Record<string, unknown>; before: { ok: boolean; output: string }; after: { ok: boolean; output: string } }>; error?: string } | null
+  error?: string
 }
 
 // ── Tool builder (design spec §2) — session state mirrored from /api/builder/* ─
@@ -1383,6 +1398,112 @@ function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: Buil
   )
 }
 
+// ── Tool refinement card — drives /api/refine/* for one session ──────────────
+// Diff first, evidence second, apply last: the apply button only exists once the
+// server reports a passed smoke test (and the server refuses without one anyway).
+function RefineCard({ view, onUpdate }: { view: RefineView; onUpdate: (s: RefineView) => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const call = async (path: string, label: string) => {
+    setBusy(label); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/refine/${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: view.id }),
+      })
+      const data = await r.json()
+      if (!r.ok) { setError(data.error ?? `${label} failed`); return }
+      onUpdate(data.session)
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally { setBusy(null) }
+  }
+
+  const statusLabel: Record<RefineView['status'], string> = {
+    proposed: 'proposed - not yet verified',
+    verified: 'smoke test passed - ready to apply',
+    applied: 'applied',
+    failed: 'refinement failed',
+  }
+  const statusColor: Record<RefineView['status'], string> = {
+    proposed: '#fbbf24', verified: '#4ade80', applied: '#4ade80', failed: '#f87171',
+  }
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600, letterSpacing: '0.04em',
+    border: '1px solid rgba(124,124,248,0.35)', background: enabled ? 'rgba(124,124,248,0.15)' : 'rgba(124,124,248,0.05)',
+    color: enabled ? '#c9c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+    transition: 'background 0.15s ease-in-out',
+  })
+  const mono: React.CSSProperties = { fontSize: 11, fontFamily: 'ui-monospace, monospace', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(124,124,248,0.18)', borderRadius: 12, padding: 12,
+      background: 'rgba(124,124,248,0.04)', display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: statusColor[view.status], flexWrap: 'wrap' as const }}>
+        <span>refine {view.toolName} v{view.fromVersion}</span>
+        <span style={{ color: '#555' }}>·</span>
+        <span>{statusLabel[view.status]}</span>
+        {busy && <span style={{ color: '#888', textTransform: 'none' as const, letterSpacing: 0 }}>· {busy}…</span>}
+      </div>
+
+      {view.explanation && <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>{view.explanation}</div>}
+
+      {view.diffs.map((d, i) => (
+        <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#7c7cf8' }}>{d.field}</div>
+          <div style={{ ...mono, background: 'rgba(248,113,113,0.07)', borderLeft: '2px solid #f87171', borderRadius: 6, padding: '5px 8px', color: '#d9a0a0', overflowX: 'auto' as const }}>{d.old}</div>
+          <div style={{ ...mono, background: 'rgba(74,222,128,0.07)', borderLeft: '2px solid #4ade80', borderRadius: 6, padding: '5px 8px', color: '#a0d9b0', overflowX: 'auto' as const }}>{d.new}</div>
+        </div>
+      ))}
+
+      {view.status !== 'applied' && view.status !== 'failed' && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+          <button disabled={!!busy} onClick={() => call('smoke', 'smoke testing')} style={btn(!busy)}>
+            {view.smoke ? 'run smoke test again' : 'run smoke test'}
+          </button>
+          {view.status === 'verified' && (
+            <button disabled={!!busy} onClick={() => call('apply', 'applying')} style={btn(!busy)}>apply</button>
+          )}
+          {view.status === 'proposed' && (
+            <span style={{ fontSize: 10.5, color: '#888' }}>apply unlocks after a passing smoke test</span>
+          )}
+        </div>
+      )}
+
+      {view.smoke && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: view.smoke.passed ? '#4ade80' : '#f87171' }}>
+            smoke test {view.smoke.passed ? 'passed' : 'failed'} · before / after
+          </div>
+          {view.smoke.steps.map((s, i) => (
+            <div key={i} style={{ fontSize: 11, fontFamily: 'ui-monospace, monospace', background: 'rgba(0,0,0,0.25)', borderRadius: 8, padding: '6px 8px', overflowX: 'auto' as const, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <div style={{ color: '#888', wordBreak: 'break-all' as const }}>args: {JSON.stringify(s.args)}</div>
+              <div style={{ color: '#999', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>before: {s.before.ok ? 'ok' : 'fail'} - {s.before.output}</div>
+              <div style={{ color: s.after.ok ? '#4ade80' : '#f87171', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>after: {s.after.ok ? 'ok' : 'fail'} - {s.after.output}</div>
+            </div>
+          ))}
+          {view.smoke.error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.smoke.error}</div>}
+        </div>
+      )}
+
+      {view.status === 'applied' && (
+        <div style={{ fontSize: 12, color: '#4ade80' }}>
+          Applied as v{view.fromVersion + 1}. The previous version is archived — say "roll back {view.toolName}" or use rollback_tool to restore it.
+        </div>
+      )}
+      {view.status === 'failed' && view.error && (
+        <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.error}</div>
+      )}
+
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+    </div>
+  )
+}
+
 function AgentPanel({ agent }: { agent: AgentState }) {
   const verifyByLatest = agent.verifies[agent.verifies.length - 1]
   return (
@@ -2293,6 +2414,11 @@ export default function App() {
           if (parsed.type === 'builder_session') {
             builderRound = true
             setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, builder: parsed.session }))
+            continue
+          }
+          if (parsed.type === 'refine_session') {
+            builderRound = true   // same handling: no agent state, direct final text
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, refine: parsed.session }))
             continue
           }
           if (builderRound && parsed.type === 'final') {
@@ -3628,6 +3754,12 @@ export default function App() {
                 <BuilderCard
                   view={round.builder}
                   onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, builder: s }))}
+                />
+              )}
+              {round.refine && (
+                <RefineCard
+                  view={round.refine}
+                  onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, refine: s }))}
                 />
               )}
 

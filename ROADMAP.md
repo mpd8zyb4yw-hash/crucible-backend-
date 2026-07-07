@@ -1346,6 +1346,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07h — Adaptive tool refinement: NL edits with diff + mandatory before/after smoke test (design-spec item 3, §4.2/§4.3)
+
+New `src/CrucibleEngine/toolRefiner.ts` — "make reverse_text also uppercase the output":
+
+- **Diff, never overwrite (§4.2)**: `startRefine()` has the model apply the smallest change
+  to the current spec and returns field-level diffs (description/params/body, old vs new). A
+  proposal with zero diffs is rejected outright. Proposals pin `fromVersion`; if the tool
+  changes underneath (agent edit, another session), smoke/apply fail with an explicit version
+  conflict instead of clobbering.
+- **Mandatory before/after gate (§4.3)**: `smokeRefine()` runs OLD and NEW bodies on the same
+  scenarios (empty-args probe + model-generated realistic args) and stores the before/after
+  transcript. `applyRefine()` throws without a passed smoke test — same structural gate as
+  the builder's install. Apply goes through `updateDynamicTool()` (07e), so it's a new
+  version with the prior one archived; instant rollback via rollback_tool.
+- **Chat capture**: `detectRefineRequest()` — refine verb + the name of an *existing* dynamic
+  tool (underscores or spaces); no known tool named → null, message flows to the pipeline
+  untouched. Wired into `/api/chat` after the builder capture, emitting `refine_session` SSE.
+- **Endpoints**: `POST /api/refine/{start,smoke,apply}`, `GET /api/refine/:id`.
+- **Frontend `RefineCard`** (App.tsx): red/green field diffs (monospace, overflowX-scrollable),
+  smoke-test button, before/after transcript per scenario, apply button that only exists in
+  the DOM once the server reports `verified`, "applied as vN — previous version archived"
+  confirmation. Status header says "proposed - not yet verified" until evidence exists.
+- Verified: 16-assertion tsx test (detection precision incl. spaced names, diff generation,
+  apply-before-smoke refused, before/after transcript `elbicurc`→`ELBICURC`, versioned apply
+  with live re-registration, stale-version conflict, no-change rejection, broken proposal
+  fails smoke + uninstallable, unknown tool) — all pass. Frontend typecheck clean. Live
+  server probes: refine endpoints wired behind auth; chat capture verified end-to-end with a
+  seeded dynamic tool (reached the refiner branch; model call errors on this keyless box,
+  as expected).
+- **§4.1 (usage-pattern suggestions) is NOT built** — needs per-invocation context tagging
+  that doesn't exist yet. That plus a model-backed E2E in a keyed environment are the
+  remaining item-3 gaps.
+
 ### 2026-07-07g — Tool builder wired into chat + frontend builder card (item 2 complete on the happy path)
 
 Completes the wiring left open in 07f — the builder is now reachable end-to-end from chat:

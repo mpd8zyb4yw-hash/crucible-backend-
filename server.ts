@@ -45,6 +45,7 @@ import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMem
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
 import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
 import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
+import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -1641,6 +1642,35 @@ app.post('/api/chat', async (req, res) => {
       if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
     } catch (e: any) {
       send({ type: 'final', text: `Could not start the tool builder: ${e?.message ?? e}` })
+    }
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
+
+  // ── Tool refinement capture (design spec §4.2) ──────────────────────────────
+  // "make <existing dynamic tool> less chatty" opens a refine session: proposed
+  // diff, never a silent overwrite. Only fires when the message names a dynamic
+  // tool that actually exists for this project.
+  const refineProjectPath = req.body.projectPath ? path.resolve(req.body.projectPath) : process.cwd()
+  const refineHit = req.body.builderMode !== false ? detectRefineRequest(message ?? '', refineProjectPath) : null
+  if (refineHit) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    const send = (payload: object) => {
+      const line = `data: ${JSON.stringify(payload)}\n\n`
+      res.write(line)
+      if (chatSessionId) broadcastEvent(chatSessionId, line, res)
+    }
+    try {
+      const s = await startRefine(refineHit.toolName, refineHit.instruction, refineProjectPath, builderCallModel)
+      send({ type: 'refine_session', session: s })
+      const intro = `Proposed change to ${s.toolName} (v${s.fromVersion}): ${s.explanation}\n\nReview the diff, then run the smoke test to see before/after output. Nothing is applied until the smoke test passes and you approve.`
+      send({ type: 'final', text: intro })
+      if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
+    } catch (e: any) {
+      send({ type: 'final', text: `Could not start the refinement: ${e?.message ?? e}` })
     }
     res.write('data: [DONE]\n\n')
     res.end()
@@ -4686,6 +4716,37 @@ app.get('/api/builder/:id', (req, res) => {
   const s = getBuilderSession(req.params.id)
   if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
   res.json({ session: builderSessionView(s) })
+})
+
+// ── Tool refinement (design spec §4.2/§4.3) ──────────────────────────────────
+// start → { session } with field diffs; smoke → before/after transcript; apply
+// (refused server-side unless the smoke test passed) → new version, rollbackable.
+
+app.post('/api/refine/start', async (req, res) => {
+  try {
+    const s = await startRefine(String(req.body?.toolName ?? ''), String(req.body?.instruction ?? ''), req.body?.projectPath || process.cwd(), builderCallModel)
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/refine/smoke', async (req, res) => {
+  try {
+    const s = await smokeRefine(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath), builderCallModel)
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/refine/apply', (req, res) => {
+  try {
+    const s = applyRefine(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath))
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.get('/api/refine/:id', (req, res) => {
+  const s = getRefineSession(req.params.id)
+  if (!s) { res.status(404).json({ error: 'no such refine session' }); return }
+  res.json({ session: s })
 })
 
 // POST /api/agent/graduate — approve global graduation for a dynamic tool (I6)

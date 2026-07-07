@@ -65,7 +65,7 @@ export function sessionView(s: BuilderSession) {
 
 // ── Model-output parsing ──────────────────────────────────────────────────────
 
-function parseJsonBlock(text: string): Record<string, unknown> | null {
+export function parseJsonBlock(text: string): Record<string, unknown> | null {
   // Strip fences, find the outermost object
   const cleaned = text.replace(/```(?:json)?/g, '').trim()
   const start = cleaned.indexOf('{')
