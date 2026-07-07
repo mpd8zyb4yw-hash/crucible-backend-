@@ -11,6 +11,7 @@ import { appendGlobalMemory } from '../state/session'
 import { buildGraphDigest, findEntities, upsertEntity, touchEntities } from '../entityGraph'
 import { gFetch, googleServicesStatus } from './googleApis'
 import { getUITree, clickElement, typeText } from '../macTools'
+import { researchTopic } from '../research/webResearch'
 
 const tools = new Map<string, ToolDef>()
 
@@ -548,6 +549,32 @@ registry.register({
       return { ok: true, output }
     } catch (e: any) {
       return { ok: false, output: `Search failed: ${e?.message ?? e}` }
+    }
+  },
+})
+
+registry.register({
+  name: 'web_research',
+  description: 'Targeted research across trustworthy, domain-appropriate sources (arXiv, Hacker News, Stack Overflow, GitHub, Wikipedia, general web) instead of a single generic search. Picks sources automatically based on whether the query is academic, current-events, technical, or general. Use for specific, narrow research questions (e.g. "DeepSeek R1 reasoning architecture") rather than broad topics. Each result is tagged with its source and a 0-1 authority score.',
+  params: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'A specific, targeted research query — not a broad topic.' },
+    },
+    required: ['query'],
+  },
+  async run(args) {
+    const query = String(args.query ?? '').trim()
+    if (!query) return { ok: false, output: 'A non-empty "query" is required.' }
+    try {
+      const findings = await researchTopic(query)
+      if (!findings.length) return { ok: false, output: 'No results found across the selected sources.' }
+      const output = findings
+        .map((f, i) => `${i + 1}. [${f.source}, authority ${f.authorityScore.toFixed(2)}] ${f.content}\n   ${f.url}`)
+        .join('\n\n')
+      return { ok: true, output }
+    } catch (e: any) {
+      return { ok: false, output: `Research failed: ${e?.message ?? e}` }
     }
   },
 })

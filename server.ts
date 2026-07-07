@@ -312,6 +312,8 @@ import { runModelHunter, loadDiscoveredModels } from './src/CrucibleEngine/model
 // ── Track C — Living Corpus ───────────────────────────────────────────────────
 import { initCorpus, corpusStatus, startAcquisition } from './src/CrucibleEngine/corpus/index'
 import { ingestDocument } from './src/CrucibleEngine/corpus/ingest'
+import { getCoverageGaps } from './src/CrucibleEngine/corpus/db'
+import { researchTopic } from './src/CrucibleEngine/research/webResearch'
 
 // Load previously-discovered models into the live registry at startup
 ;(function loadDiscovered() {
@@ -4282,6 +4284,34 @@ app.get('/api/index/stats', (req, res) => {
   const stats = getIndexStats()
   if (!stats) return res.json({ indexed: false })
   res.json({ indexed: true, ...stats })
+})
+
+// ── Track R — Intelligent Web Research + Gap Detection status ────────────────
+// Surfaces the same per-domain coverage-gap signal the corpus already tracks
+// (staleness/retrieval-hit-rate/confidence), which is what the gap detector
+// reads before deciding whether a query needs live research.
+app.get('/api/research/status', (_req, res) => {
+  try {
+    const gaps = getCoverageGaps()
+      .slice()
+      .sort((a, b) => b.priority_score - a.priority_score)
+    res.json({ gaps, topGapDomains: gaps.slice(0, 5).map(g => g.domain) })
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message })
+  }
+})
+
+// Manual research trigger — same source-selection logic MASTERPIECE uses when
+// it flags a mid-reasoning gap, exposed directly for debugging/manual lookup.
+app.post('/api/research/query', async (req, res) => {
+  const query = String(req.body?.query ?? '').trim()
+  if (!query) return res.status(400).json({ error: 'query is required' })
+  try {
+    const findings = await researchTopic(query)
+    res.json({ query, findings })
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message })
+  }
 })
 
 // ── Track C — Living Corpus status ────────────────────────────────────────────

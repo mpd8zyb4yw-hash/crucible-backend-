@@ -161,6 +161,8 @@ export interface MasterpieceResult {
   escalatedShardCount: number
   elapsedMs: number
   refinedShards: RefinedShard[]
+  researchGapsDetected?: number   // Track R — shards where the corpus had no answer
+  researchFindingsUsed?: number   // Track R — web findings folded into the dialectical pass
 }
 
 // ── Gate decision ──────────────────────────────────────────────────────────
