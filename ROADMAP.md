@@ -1346,6 +1346,41 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
+
+Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
+the next failure report to reveal the next gap. Found four more early-return paths with the
+exact same shape as 2026-07-07b's A0/simple-tier gap — a single model's (or a joined multi-model)
+answer sent straight to the user, never touching `domainVerify()`:
+
+- **Layer 1 corpus-first gate** (inside the normal/ensemble-on pipeline, not just A0's copy of
+  it) — returns before Stage 1–5 even starts.
+- **Step 7 offline-mode fallback** (external pool fully tripped, `localInferenceAvailable` true)
+  — same raw-single-model shape as A0's on-device path, just reached via a different trigger.
+- **L2 Parallel Workstreams join** — each decomposed subtask is answered independently and
+  joined/lightly polished, but the combined result never passed through Stage 5b either.
+- **MASTERPIECE deep mode** — the most important of the four: it runs *after* Stage 5b and
+  **replaces** the already-verified, already-polished synthesis with fresh dialectical content,
+  silently discarding the verification that answer already had. Without a check here, deep mode
+  could regress a good, verified answer into an unverified one and nobody would know.
+
+All four now route through `verifyAndRepair()` (`baselineVerify.ts`, added in 07b) before
+sending, each with its own `baseline_verify_repaired` debug event
+(`layer1_corpus_first` / `offline_mode` / `l2_workstreams` / `masterpiece_deep`) so a repair on
+any of them is visible via `/api/debug/stream`, same as every other stage.
+
+**Deliberately left alone**, confirmed by reading each site: the Collab-gradient clarify
+response (templated system text, not a factual claim), the ANIMA transparency report
+(a structured dump of the truth store, not model-generated prose), M1 conversational (still
+exempt — no factual claims to check), and the Stage 5b final synthesis sends themselves (that
+*is* the already-verified output — verifying it again would be redundant, not another gap).
+
+**The actual invariant this now enforces:** no code path in `server.ts` sends a `synthesis`
+event built from freeform model or joined-model text without it having passed through either
+Stage 5b's full verify/critique/polish loop, or `verifyAndRepair()`. If a new early-return exit
+is ever added to this file, grep for `type: 'synthesis'` and check it against that list before
+calling it done — that's the actual hull, not a growing list of individually-patched holes.
+
 ### 2026-07-07b — Universal verification baseline for A0 + simple-tier (closes the gap below)
 
 Follow-up to the counting-gate fix below, per direction to reinforce the structural gap rather
