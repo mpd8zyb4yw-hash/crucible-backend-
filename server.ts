@@ -32,6 +32,7 @@ import { defaultSystemPreamble } from './src/CrucibleEngine/agent/loop'
 import { extractSubtasks } from './src/CrucibleEngine/goalDecomposer'
 import { detectConversational, buildConversationalFallback, applyVoiceLayer } from './src/CrucibleEngine/conversationalMode'
 import { answerCountingQuery } from './src/CrucibleEngine/countingVerifier'
+import { verifyAndRepair } from './src/CrucibleEngine/baselineVerify'
 import { readScratch } from './src/CrucibleEngine/agent/taskScratchpad'
 import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools'
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
@@ -1935,7 +1936,13 @@ app.post('/api/chat', async (req, res) => {
         ])
         if (corpusAns) {
           const domains = [...new Set(corpusAns.sources.map(s => s.domain))].join(', ')
-          const answerText = `${applyVoiceLayer(corpusAns.answer)}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
+          // Baseline verify — this path never reaches the full pipeline's Stage 5b
+          // verifier/critic, so it gets its own deterministic check + one cheap
+          // local repair pass instead of shipping the model's raw guess.
+          const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(corpusAns.answer),
+            (sys, usr) => callLocalModel(sys, usr, 8000))
+          if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_corpus', issues: vr.issues }, { severity: 'info', requestId })
+          const answerText = `${vr.text}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
           debugBus.emit('pipeline', 'local_only_corpus', { confidence: corpusAns.confidence, sources: corpusAns.sources.length }, { severity: 'success', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
@@ -1947,7 +1954,13 @@ app.post('/api/chat', async (req, res) => {
           30000,
         )
         if (local.trim()) {
-          const answerText = `${applyVoiceLayer(local.trim())}\n\n*Answered on-device by Crucible — no external models used.*`
+          // Same baseline verify+repair pass as the corpus branch above — this is
+          // the rawest exit point (a single small model, zero corpus grounding),
+          // so it is the one most likely to need a correction.
+          const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(local.trim()),
+            (sys, usr) => callLocalModel(sys, usr, 8000))
+          if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_synth', issues: vr.issues }, { severity: 'info', requestId })
+          const answerText = `${vr.text}\n\n*Answered on-device by Crucible — no external models used.*`
           debugBus.emit('pipeline', 'local_only_synth', { chars: local.length }, { severity: 'info', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
@@ -2100,11 +2113,19 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'contract', promptType: simplePT, requiredStructure: [], forbiddenAntipatterns: [] })
         send({ type: 'stage', stage: 1, status: 'start' })
         const t0s = Date.now()
-        const reply = await callModel(fastModel, [
+        const rawReply = await callModel(fastModel, [
           { role: 'system', content: 'Answer concisely and accurately in 1-3 sentences.' },
           { role: 'user', content: message },
         ], { requestId })
         const latencyMs = Date.now() - t0s
+        // Baseline verify — this tier exists specifically to skip the full
+        // pipeline's Stage 5b verifier/critic for speed, but "skip the pipeline"
+        // must never mean "skip verification entirely." One deterministic check
+        // + one cheap same-model repair pass, same as the A0 on-device-only path.
+        const vr = await verifyAndRepair(message, simplePT, rawReply,
+          (sys, usr) => callModel(fastModel, [{ role: 'system', content: sys }, { role: 'user', content: usr }], { requestId }))
+        const reply = vr.text
+        if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'triage_simple', issues: vr.issues }, { severity: 'info', requestId })
         send({ type: 'layer1', modelId: fastModel.id, model: fastModel.label, text: reply, done: true })
         send({ type: 'stage', stage: 1, status: 'done' })
         send({ type: 'synthesis', modelId: fastModel.id, model: fastModel.label, text: reply, done: true, replace: false })

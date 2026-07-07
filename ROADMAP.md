@@ -1346,6 +1346,45 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07b — Universal verification baseline for A0 + simple-tier (closes the gap below)
+
+Follow-up to the counting-gate fix below, per direction to reinforce the structural gap rather
+than pattern-match each failure shape as it's found. The actual defect wasn't "counting is
+wrong" — it's that **two entire exit paths ship a single model's raw output with zero
+verification of any kind**: A0 (`ensemble:false`, on-device-only) and the `triageTier ===
+'simple'` fast path. Both were built to skip the full pipeline for speed/privacy, and skipping
+the pipeline silently meant skipping every check in it too — `domainVerify()`
+(math/factual/consistency, `domainVerifiers.ts`) and the Stage 5b critic/polish loop only ever
+ran for requests that made it to the full pipeline.
+
+Added `src/CrucibleEngine/baselineVerify.ts` (`verifyAndRepair`): runs the existing
+`domainVerify()` against any single-model answer, and — only when it flags a real issue at
+`confidence > 0.5` — makes ONE cheap repair call back to the *same* model (never a premium
+upgrade) with the specific flagged issues, keeping the repair only if it isn't a degenerate
+near-empty collapse. Wired into all three raw exit points: A0's corpus-first branch, A0's
+local-FM-synthesis branch, and the simple-triage fast path (`server.ts`) — each now emits a
+`baseline_verify_repaired` debug event when a repair actually fires, so it's observable via
+`/api/debug/stream` like every other stage. Falls through silently on any verifier/repair error,
+matching the existing non-blocking convention everywhere else in the pipeline.
+
+Unit-tested `verifyAndRepair` in isolation (wrong-math → detected + repaired; correct math → no
+repair call; a repair that collapses to near-nothing → original kept; prompt types with no
+verifier → passthrough, zero extra calls). Could not exercise the A0 on-device branches
+end-to-end in this sandbox (no Apple FM bridge / no network egress to any provider here — both
+pre-existing environment limits, unrelated to this change) — confirmed instead that the
+`triageTier === 'simple'` path's existing try/catch correctly falls through to the full pipeline
+when a provider call fails, so the new code doesn't introduce a new failure mode there. The
+Layer 0 counting gate below was re-verified live after this change and still short-circuits
+before any of this — it's cheaper to just compute the answer than to verify a model's guess at
+one.
+
+**Deliberately NOT covered:** M1 conversational mode (`conversationalMode.ts`) is untouched —
+"hi" / "thanks" / "test" replies are intentionally casual with no factual claims to verify, so
+routing them through `domainVerify()` would be pure overhead. The full pipeline's own Stage
+5b/critic loop is also untouched — it's already more sophisticated than this shared baseline, no
+need to downgrade it. If a future weak-answer report comes from the full pipeline (not A0/simple
+tier), that's a Stage 5b tuning problem, not another missing baseline.
+
 ### 2026-07-07 — Deterministic counting gate: fixed hallucinated "how many r's in X" answers
 
 **Bug (user-reported, reproduced end-to-end):** with ensemble off, three chained "how many
@@ -1376,9 +1415,9 @@ three reported queries (now correct: 3 r's in strawberry; 0 "strawberries" in "p
 pipeline untouched, confirming no false-positive hijack of ordinary questions).
 
 **Still open:** this closes the specific counting-hallucination class, not weak on-device output
-in general — the A0/simple-tier paths still have no verification for other prompt types. If this
-recurs for a different query shape, extend `domainVerifiers.ts`'s router (Stage 5b) to also run
-against the A0/simple-tier single-model answers, not just the full pipeline.
+in general — the A0/simple-tier paths still have no verification for other prompt types. →
+**Resolved in 2026-07-07b below**, which wires `domainVerify()` + a repair pass into both paths
+generally instead of adding another one-off pattern gate.
 
 ### 2026-07-06 — Resolved v3 UI redesign's canonical-repo question; set up two-agent port plan
 
