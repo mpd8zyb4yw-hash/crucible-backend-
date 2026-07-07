@@ -1965,8 +1965,14 @@ app.post('/api/chat', async (req, res) => {
             const outputs = await orchestrateLocalModels(decision, message, { registry: localRegistry, history })
             const result = strengthenLocalModels(message, outputs)
             if (result.answer.trim()) {
+              // Baseline verify — this is another raw model-answer exit (same shape as
+              // the corpus-first/local-FM-synth branches above), so it gets the same
+              // deterministic check + one cheap same-model repair pass before shipping.
+              const vr = await verifyAndRepair(message, localPromptType, result.answer.trim(),
+                (sys, usr) => callLocalModel(sys, usr, 8000))
+              if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_ensemble', issues: vr.issues }, { severity: 'info', requestId })
               const contributorLabel = result.contributors.join(', ') || 'local ensemble'
-              const answerText = `${result.answer}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
+              const answerText = `${vr.text}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
               debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
               emitLocal(answerText, 'local/ensemble', 'Crucible (on-device ensemble)')
               return
