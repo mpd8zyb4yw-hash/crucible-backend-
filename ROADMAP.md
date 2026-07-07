@@ -26,9 +26,17 @@
 >    it must keep the original rendered layout (fenced code stays a code block, prose stays
 >    prose) and change only the content — see `applyFixedCode()` in `src/App.tsx`.
 > 4. **Run commands:** backend `nohup npx tsx server.ts > /tmp/crucible-server.log 2>&1 < /dev/null & disown`
->    (port 3001; plain `&` gets reaped between turns). Frontend: vite via `.claude/launch.json`
->    config `crucible-vite` (~port 5180). Never `npm run build`. Engine code under
+>    (port 3001; plain `&` gets reaped between turns). Frontend dev: vite via
+>    `.claude/launch.json` config `crucible-vite` (~port 5180). Engine code under
 >    `src/CrucibleEngine/` runs via `tsx`, not typechecked by the app tsconfig.
+>    **Shipping a frontend change — do NOT skip this:** phones and any browser hitting
+>    `:3001` load the STATIC bundle in `app/` (gitignored, built locally), NOT the vite dev
+>    server. A source edit to `src/*.tsx`/`*.css` is invisible on `:3001` until you rebuild:
+>    run **`npx vite build`** (regenerates `app/`) and restart the server. The old
+>    "never `npm run build`" rule meant only *don't run the `tsc -b` gate in the npm build
+>    script* (it breaks on the app tsconfig) — it did NOT mean "never build the frontend,"
+>    and taking it literally means every UI change silently never reaches the phone. Verify
+>    UI work against `:3001` (the real device path), not just `:5180`.
 >
 > Checkbox legend: `[x]` done & verified in code · `[~]` partial (note what's missing) · `[ ]` not built.
 
@@ -1345,6 +1353,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 ---
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
+
+### 2026-07-07m — §4.1 usage-pattern tuning suggestions + CRITICAL frontend-build fix
+
+**Process fix first (this is why the user "saw no changes"):** every frontend change since 07e
+was committed as *source* but the `app/` static bundle that phones and `:3001` actually load
+was never rebuilt — I'd been verifying against the vite dev server (`:5180`) only. Ran
+`npx vite build`, confirmed all five systems' UI is now baked into `app/assets/*` and renders
+on the real `:3001` phone path (screenshot: Connected Devices sheet, pairing, builder chat
+capture all present). Clarified the misleading "never npm run build" ROADMAP rule so this
+can't recur. **`app/` is gitignored — a deploy that only `git pull`s must run `vite build`.**
+
+**§4.1 — adaptive refinement's usage-pattern detection (completes design-spec item 3):**
+- `recordToolSuccess(projectPath, name, domain?)` — was previously DEAD CODE (defined, never
+  called, so `successCount`/graduation never actually incremented). Now called from
+  `registry.exec` on every successful tool run, tagging dynamic-tool invocations with the
+  request's classified domain (`domainCounts` on the record). No-ops for built-in tools.
+- `ctx.domainTag` threaded from `/api/chat` (via `classifyDomain(message)`) through
+  runAgentLoop/runPlannedTask into `registry.exec` — all four agent execution paths.
+- `detectTuningSuggestion(record)` — pure: fires when a tool has ≥5 tagged uses AND ≥60%
+  concentration in one non-`general` domain not already suggested. `markDomainSuggested`
+  suppresses repeats; a NEW dominant domain can still surface later.
+- `registry.exec` emits a `tool_tuning_suggestion` SSE event when the threshold is crossed;
+  `GET /api/tools/suggestions` + `POST /api/tools/suggestions/dismiss` for polling.
+- Frontend `TuningBanner`: "You've used X mostly for {domain} — tune it?" → "tune it" opens a
+  real refine session (07h diff + before/after smoke gate; nothing auto-applies), "dismiss"
+  suppresses that domain. Suggestion, never a redirect (§4.1).
+- Verified: 11-assertion tsx test (tagging, threshold, even-spread rejection, general
+  excluded, dismiss suppression, new-domain resurfacing, built-in no-op, registry.exec SSE
+  emission) all pass; frontend + new-code typecheck clean.
+
+This closes every buildable item in the design spec. Remaining gaps are all
+environment-bound: model-backed E2E of builder/refiner/tuning (needs provider keys), a real
+GitHub crawl (needs egress), iOS keyboard behavior, and the persona runtime (§2.2, unbuilt).
 
 ### 2026-07-07l — Mobile UI bug sweep + overhaul (verified with scripted phone-viewport walkthrough)
 

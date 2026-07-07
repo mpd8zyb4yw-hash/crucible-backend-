@@ -6,7 +6,7 @@ import path from 'path'
 import { spawn, execFile } from 'child_process'
 import type { ToolCall, ToolCtx, ToolDef, ToolResult } from './protocol'
 import { createCheckpoint } from '../checkpoint'
-import { compileTool, saveDynamicTool, listDynamicTools, recordToolSuccess, updateDynamicTool, rollbackDynamicTool, listToolVersions, loadDynamicTool, toolVersion, type DynamicToolRecord } from './dynamicTools'
+import { compileTool, saveDynamicTool, listDynamicTools, recordToolSuccess, detectTuningSuggestion, updateDynamicTool, rollbackDynamicTool, listToolVersions, loadDynamicTool, toolVersion, type DynamicToolRecord } from './dynamicTools'
 import { appendGlobalMemory } from '../state/session'
 import { buildGraphDigest, findEntities, upsertEntity, touchEntities } from '../entityGraph'
 import { gFetch, googleServicesStatus } from './googleApis'
@@ -56,6 +56,18 @@ export const registry = {
       const result = await def.run(call.args, ctx)
       if (ctx.deviceTier && ctx.deviceId) {
         appendAudit(ctx.projectPath, { deviceId: ctx.deviceId, action: 'tool', detail: `${call.name} ${JSON.stringify(call.args).slice(0, 200)}`, ok: result.ok })
+      }
+      // §4.1 — tag successful dynamic-tool invocations with the request domain.
+      // recordToolSuccess no-ops for built-in tools (no on-disk record). When the
+      // usage pattern crosses the tuning threshold, surface a one-time suggestion.
+      if (result.ok) {
+        try {
+          const updated = recordToolSuccess(ctx.projectPath, call.name, ctx.domainTag)
+          if (updated) {
+            const suggestion = detectTuningSuggestion(updated)
+            if (suggestion) ctx.emit?.({ type: 'tool_tuning_suggestion', ...suggestion })
+          }
+        } catch { /* usage tracking must never break a tool call */ }
       }
       ctx.emit?.({ type: 'tool_result', id: call.id, tool: call.name, ok: result.ok, output: result.output.slice(0, 2000), truncated: result.truncated ?? false })
       return result

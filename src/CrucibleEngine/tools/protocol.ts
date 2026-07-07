@@ -28,6 +28,9 @@ export interface ToolCtx {
   deviceTier?: 'observe' | 'build' | 'full'
   /** Device id for the remote audit log; set alongside deviceTier. */
   deviceId?: string
+  /** Inferred domain of the surrounding request (design spec §4.1). Tags dynamic-tool
+   *  invocations so the refinement detector can spot single-domain clustering. */
+  domainTag?: string
   /** Called after a successful mutating tool call with the abs paths that were written.
    *  Used by the codebase indexer to stay fresh without coupling registry to codebaseIndex. */
   onFileMutated?: (absPaths: string[]) => void

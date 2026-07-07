@@ -34,6 +34,9 @@ export interface DynamicToolRecord {
   changeNote?: string                          // why this version exists
   provenance?: { source: 'agent' | 'user_authored' | 'imported'; importedFrom: string | null }
   verification?: { lastSmokeTest: number | null; result: 'pass' | 'fail' | 'unverified' }
+  // ── Adaptive refinement usage tags (design spec §4.1) ──
+  domainCounts?: Record<string, number>   // per-domain invocation tally (the "context tag")
+  lastSuggestedDomain?: string            // domain we already proposed tuning for — don't nag
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
@@ -246,12 +249,19 @@ export function rollbackDynamicTool(
 // Session → specialist: successCount ≥ 5 across sessions
 // Specialist → global: successCount ≥ 20 across tasks; requires triumvirate approval
 
-export function recordToolSuccess(projectPath: string, name: string): DynamicToolRecord | null {
+export function recordToolSuccess(projectPath: string, name: string, domain?: string): DynamicToolRecord | null {
   const record = loadDynamicTool(projectPath, name)
   if (!record) return null
   record.useCount += 1
   record.successCount = (record.successCount ?? 0) + 1
   record.lastUsed = Date.now()
+
+  // §4.1 — tag this invocation with the surrounding conversation's domain so the
+  // refinement detector can spot a tool that clusters in one area.
+  if (domain) {
+    record.domainCounts = record.domainCounts ?? {}
+    record.domainCounts[domain] = (record.domainCounts[domain] ?? 0) + 1
+  }
 
   // Check graduation thresholds
   if (record.tier === 'session' && record.successCount >= 5) {
@@ -271,6 +281,57 @@ export function recordToolSuccess(projectPath: string, name: string): DynamicToo
 
   saveDynamicTool(projectPath, record)
   return record
+}
+
+// ── §4.1 — usage-pattern tuning suggestion ────────────────────────────────────
+// A *suggestion*, never an auto-apply. Fires when a tool is used enough times AND
+// concentrates in one non-general domain we haven't already suggested for. The
+// caller turns this into a proposal the user approves/declines (§4.2 refine flow).
+
+export interface TuningSuggestion {
+  toolName: string
+  domain: string
+  uses: number            // uses in that domain
+  total: number           // total tagged uses
+  concentration: number   // uses / total, 0–1
+}
+
+const SUGGEST_MIN_USES = 5          // don't suggest before there's a real pattern
+const SUGGEST_MIN_CONCENTRATION = 0.6
+
+/** Pure: given a record, is there a fresh tuning suggestion? Excludes 'general'
+ *  (not a tunable specialization) and any domain already suggested. */
+export function detectTuningSuggestion(record: DynamicToolRecord): TuningSuggestion | null {
+  const counts = record.domainCounts
+  if (!counts) return null
+  const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  if (total < SUGGEST_MIN_USES) return null
+  let top: string | null = null
+  let topN = 0
+  for (const [d, n] of Object.entries(counts)) {
+    if (d === 'general') continue
+    if (n > topN) { top = d; topN = n }
+  }
+  if (!top) return null
+  const concentration = topN / total
+  if (concentration < SUGGEST_MIN_CONCENTRATION) return null
+  if (record.lastSuggestedDomain === top) return null   // already proposed this one
+  return { toolName: record.name, domain: top, uses: topN, total, concentration }
+}
+
+/** Mark a domain as suggested so we don't repeat it (call after surfacing). */
+export function markDomainSuggested(projectPath: string, name: string, domain: string): void {
+  const record = loadDynamicTool(projectPath, name)
+  if (!record) return
+  record.lastSuggestedDomain = domain
+  saveDynamicTool(projectPath, record)
+}
+
+/** All fresh suggestions across a project's dynamic tools (for a polling endpoint). */
+export function allTuningSuggestions(projectPath: string): TuningSuggestion[] {
+  return listDynamicTools(projectPath)
+    .map(detectTuningSuggestion)
+    .filter((s): s is TuningSuggestion => s !== null)
 }
 
 export function approveGlobalGraduation(projectPath: string, name: string): boolean {

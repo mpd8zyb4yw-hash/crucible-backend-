@@ -43,7 +43,7 @@ import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
 import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory, readGlobalMemoryDigest, globalMemoryFile } from './src/CrucibleEngine/state/session'
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
-import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
+import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool, allTuningSuggestions, markDomainSuggested } from './src/CrucibleEngine/tools/dynamicTools'
 import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
 import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
 import { createPairingCode, claimPairingCode, verifyDeviceToken, listDevices, revokeDevice, setDeviceTier, readAudit, appendAudit as appendDeviceAudit, type RemoteDevice, type DeviceTier } from './src/CrucibleEngine/remoteDevices'
@@ -153,7 +153,7 @@ import { lookupUncertainty, recordCalibrationForQuery, getSurface } from './src/
 import { checkAmbientContext } from './src/CrucibleEngine/ambientWatcher'
 import { submitRequest, approveRequest, rejectRequest, getPendingRequests, getAllRequests } from './src/CrucibleEngine/governanceQueue'
 import { runApprovedProvisioningRequests, getProvisioningLog } from './src/CrucibleEngine/autonomousProvisioner'
-import { getDomainContext, ingestIntoDomainStore, getDomainStoreIndex } from './src/CrucibleEngine/domainRouter'
+import { getDomainContext, ingestIntoDomainStore, getDomainStoreIndex, classifyDomain } from './src/CrucibleEngine/domainRouter'
 import { buildAdaptationContext } from './src/CrucibleEngine/behavioralAdaptation'
 import { getLongHorizonContext, extendHorizonPlan, getHorizonPlan } from './src/CrucibleEngine/longHorizonPlanner'
 import { buildCausalDigest, enrichAndRecord } from './src/CrucibleEngine/causalMemory'
@@ -1739,6 +1739,8 @@ app.post('/api/chat', async (req, res) => {
     const remoteDev = (req as any).remoteDevice as RemoteDevice | undefined
     const deviceTier = remoteDev?.tier
     const deviceId = remoteDev?.id
+    // §4.1 — classify the request domain once; tags dynamic-tool usage for tuning suggestions.
+    const domainTag = classifyDomain(message ?? '').domain
 
     const ac = new AbortController()
     // res 'close' fires on client disconnect; req 'close' fires once the body is
@@ -1816,7 +1818,7 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'agent_start', driver: 'on-device (no LLM)', projectPath, resumed: false })
         const toolCtx: ToolCtx = {
           projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-          allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId,
+          allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId, domainTag,
         }
         try {
           const { ok, summary } = await runLocalPlan(localPlan, (call) => registry.exec(call, toolCtx))
@@ -1848,7 +1850,7 @@ app.post('/api/chat', async (req, res) => {
           send({ type: 'agent_start', driver: 'on-device FM (Layer 2)', projectPath, resumed: false })
           const toolCtx: ToolCtx = {
             projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-            allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId,
+            allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId, domainTag,
           }
           const { ok, summary } = await runFmPlan(fmPlan, (call) => registry.exec(call, toolCtx))
           send({ type: 'final', text: summary })
@@ -1887,7 +1889,7 @@ app.post('/api/chat', async (req, res) => {
           ? { stepIndex: iterCheckpoint.stepIndex, messages: iterCheckpoint.messages }
           : undefined,
         onFileMutated,
-        deviceTier, deviceId,
+        deviceTier, deviceId, domainTag,
       })
       // Clean up on success
       if (result.ok) {
@@ -1922,7 +1924,7 @@ app.post('/api/chat', async (req, res) => {
         ] : undefined),
         systemPreamble: `${defaultSystemPreamble(projectPath)}\n\nDEVICE CONTEXT: This request came from a ${device === 'mobile' ? 'mobile phone' : 'desktop'}. When the user asks to open apps, files, or URLs — always execute the action on the Mac desktop, never on the user's phone. If the request is ambiguous, assume they want it on the Mac.\n\nUSER LOCATION: Timezone is Europe/Rome. Use this to infer the user region for location-dependent queries like weather. Never ask for location unless the query is too specific for timezone inference.${detectExternalExecIntent(message ?? '') ? '\n\nEXECUTION INTENT DETECTED: The user wants you to perform an action on an external system (open a URL, play media, launch an app). Do NOT return a link or describe how to do it. Do NOT construct YouTube URLs from memory — video IDs from training data are dead links. For YouTube: call search_youtube with a specific query, pick the best result URL from the live results, then call open_app with that URL. For other media/apps: use web_search to find the URL, then open_app. Execute — do not instruct.' : ''}\n\n${[globalMemory, episodeContext, graphDigest, decisionCtx, memoryDigest, codebaseContext].filter(Boolean).join('\n\n')}`,
         onFileMutated,
-        deviceTier, deviceId,
+        deviceTier, deviceId, domainTag,
         // Inject a fast text-only model call for model-assisted context compression
         compressCallModel: (msgs) => {
           const { models: compModels } = selectModels('general', SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
@@ -4815,6 +4817,22 @@ app.get('/api/builder/:id', (req, res) => {
   const s = getBuilderSession(req.params.id)
   if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
   res.json({ session: builderSessionView(s) })
+})
+
+// ── Tool tuning suggestions (design spec §4.1) ───────────────────────────────
+// Poll for tools that have clustered in one domain. Surfacing a suggestion marks
+// its domain so it won't nag again; declining is just not acting on it.
+
+app.get('/api/tools/suggestions', (req, res) => {
+  const projectPath = (req.query.project as string) || process.cwd()
+  res.json({ suggestions: allTuningSuggestions(projectPath) })
+})
+
+app.post('/api/tools/suggestions/dismiss', (req, res) => {
+  const { name, domain, projectPath } = req.body ?? {}
+  if (!name || !domain) { res.status(400).json({ error: 'name and domain required' }); return }
+  markDomainSuggested(projectPath || process.cwd(), String(name), String(domain))
+  res.json({ ok: true })
 })
 
 // ── GitHub tool sources (design spec §3) ─────────────────────────────────────

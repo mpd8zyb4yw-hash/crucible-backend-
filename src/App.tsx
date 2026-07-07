@@ -310,6 +310,8 @@ interface Round {
   builder?: BuilderView | null
   // Tool refinement session ("make <tool> less chatty")
   refine?: RefineView | null
+  // §4.1 — proactive tuning suggestion surfaced when a tool clusters in one domain
+  tuning?: { toolName: string; domain: string; uses: number; total: number; concentration: number } | null
 }
 
 // ── Tool refinement (design spec §4) — session state from /api/refine/* ───────
@@ -1752,6 +1754,76 @@ function RefineCard({ view, onUpdate }: { view: RefineView; onUpdate: (s: Refine
   )
 }
 
+// ── Tuning suggestion banner (design spec §4.1) ──────────────────────────────
+// Proactive suggestion, never auto-applied. "Tune it" opens a normal refine
+// session (diff + before/after smoke gate); "Dismiss" suppresses this domain.
+function TuningBanner({ tuning, onRefine, onDismiss }: {
+  tuning: NonNullable<Round['tuning']>
+  onRefine: (view: RefineView) => void
+  onDismiss: () => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [gone, setGone] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (gone) return null
+  const domainLabel = tuning.domain.replace(/_/g, ' ')
+
+  const tune = async () => {
+    setBusy('proposing'); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/refine/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName: tuning.toolName, instruction: `Specialize this tool for ${domainLabel} tasks — it is used mostly in that domain.` }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'could not start refinement'); return }
+      apiFetch(`${API_BASE}/api/tools/suggestions/dismiss`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: tuning.toolName, domain: tuning.domain }),
+      }).catch(() => {})
+      onRefine(d.session)
+      setGone(true)
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+    finally { setBusy(null) }
+  }
+
+  const dismiss = () => {
+    apiFetch(`${API_BASE}/api/tools/suggestions/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: tuning.toolName, domain: tuning.domain }),
+    }).catch(() => {})
+    onDismiss(); setGone(true)
+  }
+
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600,
+    border: '1px solid rgba(192,132,252,0.35)', background: enabled ? 'rgba(192,132,252,0.14)' : 'rgba(192,132,252,0.05)',
+    color: enabled ? '#e0c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+  })
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(192,132,252,0.2)', borderRadius: 12, padding: 12,
+      background: 'rgba(192,132,252,0.05)', display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#c084fc' }}>
+        tuning suggestion
+      </div>
+      <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>
+        You've used <strong style={{ color: '#e0c9ff' }}>{tuning.toolName}</strong> mostly for {domainLabel} work
+        ({tuning.uses} of {tuning.total} times). Want to tune it toward that domain? Nothing changes until you
+        review the diff and the before/after smoke test.
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+        <button disabled={!!busy} onClick={tune} style={btn(!busy)}>tune it</button>
+        <button disabled={!!busy} onClick={dismiss} style={{ ...btn(!busy), background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#888' }}>dismiss</button>
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+    </div>
+  )
+}
+
 function AgentPanel({ agent }: { agent: AgentState }) {
   const verifyByLatest = agent.verifies[agent.verifies.length - 1]
   return (
@@ -2669,6 +2741,16 @@ export default function App() {
           if (parsed.type === 'refine_session') {
             builderRound = true   // same handling: no agent state, direct final text
             setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, refine: parsed.session }))
+            continue
+          }
+          if (parsed.type === 'tool_tuning_suggestion') {
+            // Attach to the latest round (a tool fired during this turn's agent run).
+            const { type: _t, ...tuning } = parsed
+            setRounds(prev => {
+              if (!prev.length) return prev
+              const last = prev[prev.length - 1]
+              return prev.map(r => r.id !== last.id ? r : { ...r, tuning })
+            })
             continue
           }
           if (builderRound && parsed.type === 'final') {
@@ -4034,6 +4116,13 @@ export default function App() {
                 <RefineCard
                   view={round.refine}
                   onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, refine: s }))}
+                />
+              )}
+              {round.tuning && !round.refine && (
+                <TuningBanner
+                  tuning={round.tuning}
+                  onRefine={view => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, refine: view, tuning: null }))}
+                  onDismiss={() => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, tuning: null }))}
                 />
               )}
 
