@@ -1354,6 +1354,23 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07n — SHIP THE BUNDLE: commit built `app/` so frontend changes reach the phone
+
+The user reported (twice) that no UI changes appeared on their iPhone, with horizontal
+scrolling and a left pane overlapping the chat bar / agent tabs. Diagnosis: those bugs are
+from the OLD build — the current source at 390px has **zero** horizontal overflow and no
+overlap (verified with a Playwright element-bounds sweep: `docScrollW === vw === 390`, empty
+offender list, in both plain-chat and agent/builder states). The changes weren't reaching the
+device because **`app/` was gitignored and never committed**, and there is no deploy-time
+build step — the server just serves whatever `app/` exists on disk. The `sw.js` service
+worker is push-only (no asset caching), so it wasn't the cause.
+
+Fix: removed `app/` from `.gitignore` and committed the freshly-built bundle. Because
+`vite build` emits new content-hashed filenames each build, the directory (not just
+individual files) must stay un-ignored so every rebuild ships. **Going forward: after any
+`src/*.tsx`/`*.css` change, run `npx vite build` and commit `app/` in the same PR** — a source
+edit alone is invisible on device. This is now also called out in the header run-commands rule.
+
 ### 2026-07-07m — §4.1 usage-pattern tuning suggestions + CRITICAL frontend-build fix
 
 **Process fix first (this is why the user "saw no changes"):** every frontend change since 07e
