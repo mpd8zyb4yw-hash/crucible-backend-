@@ -1346,6 +1346,33 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07e — Dynamic tool versioning + rollback (design-spec item 1)
+
+First build item from `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md`: every dynamic tool is
+now versioned with one-call rollback, making tool changes reversible (design principle 4).
+
+- **`dynamicTools.ts`** — `DynamicToolRecord` gains `version`, `changeNote`, `provenance`,
+  `verification` (all optional; legacy records read as v1). New: `updateDynamicTool()` archives
+  the outgoing record to `.crucible/dynamic-tools/history/<name>/v<N>.json` and bumps the
+  version; `rollbackDynamicTool()` restores any archived version *as a new version* (history is
+  append-only — a rollback can itself be rolled back, nothing is ever destroyed); usage-counter
+  writes (`recordToolSuccess`) deliberately never bump the version. `listToolVersions()` /
+  `loadToolVersion()` for inspection.
+- **`registry.ts`** — new agent tools `update_tool` (compiles + smoke-tests the new body
+  *before* committing; a failing body leaves the tool untouched) and `rollback_tool`.
+  `create_tool` now stamps v1 with provenance + a passed verification record.
+  `list_dynamic_tools` shows versions.
+- **`server.ts`** — `GET /api/debug/dynamic-tools/:name/versions` and
+  `POST /api/tools/rollback` (restores + re-registers live in the running registry).
+- **Verified, not assumed:** 14-assertion tsx smoke test (create → invoke → update → invoke →
+  broken-update rejected → rollback → invoke shows old output → rollback-the-rollback →
+  counter writes don't bump), all passing; plus live HTTP verification of both endpoints
+  against a running server (versions listing, rollback v2→v3-restoring-v1, auth wall intact).
+  `tsc -p tsconfig.server.json` shows no new errors in changed regions (pre-existing errors
+  unchanged — server runs via tsx).
+
+Next per the build order: user-facing builder dialogue with mandatory pre-install dry run.
+
 ### 2026-07-07d — Design spec + gap analysis: Tool Builder, GitHub import, Refinement, Remote Brain
 
 Added `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md` — the full design spec for four

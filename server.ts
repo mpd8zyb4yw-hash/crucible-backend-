@@ -43,7 +43,7 @@ import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
 import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory, readGlobalMemoryDigest, globalMemoryFile } from './src/CrucibleEngine/state/session'
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
-import { loadDynamicToolsInto, dynamicToolStats } from './src/CrucibleEngine/tools/dynamicTools'
+import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -4581,6 +4581,30 @@ app.get('/api/classifier/stats', (_req, res) => {
 app.get('/api/debug/dynamic-tools', (req, res) => {
   const projectPath = (req.query.project as string) || process.cwd()
   res.json(dynamicToolStats(projectPath))
+})
+
+// GET /api/debug/dynamic-tools/:name/versions — full version history for one tool
+app.get('/api/debug/dynamic-tools/:name/versions', (req, res) => {
+  const projectPath = (req.query.project as string) || process.cwd()
+  const versions = listToolVersions(projectPath, req.params.name)
+  if (!versions.length) { res.status(404).json({ error: `no dynamic tool named '${req.params.name}'` }); return }
+  res.json({ name: req.params.name, versions })
+})
+
+// POST /api/tools/rollback — one-click restore of a prior tool version
+app.post('/api/tools/rollback', (req, res) => {
+  const { name, version, projectPath } = req.body ?? {}
+  if (!name) { res.status(400).json({ error: 'name required' }); return }
+  const record = rollbackDynamicTool(projectPath || process.cwd(), String(name), version != null ? Number(version) : undefined)
+  if (!record) { res.status(400).json({ error: `cannot roll back '${name}'${version != null ? ` to v${version}` : ''}` }); return }
+  // Make the restored version live in the running registry
+  try {
+    const run = compileDynamicTool(record.body)
+    registry.register({ name: record.name, description: record.description, params: record.params, mutates: false, run })
+  } catch (e: any) {
+    res.status(500).json({ error: `restored but failed to compile live: ${e.message}` }); return
+  }
+  res.json({ ok: true, name: record.name, version: record.version, changeNote: record.changeNote })
 })
 
 // POST /api/agent/graduate — approve global graduation for a dynamic tool (I6)

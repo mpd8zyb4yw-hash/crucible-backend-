@@ -29,6 +29,11 @@ export interface DynamicToolRecord {
   lastUsed: number | null
   tier: 'session' | 'specialist' | 'global'   // I6 graduation tier
   graduationPending?: boolean                  // flagged for triumvirate review
+  // ── ToolSpec versioning (design spec §2.3 / gap-analysis item 1) ──
+  version?: number                             // 1 for legacy records without the field
+  changeNote?: string                          // why this version exists
+  provenance?: { source: 'agent' | 'user_authored' | 'imported'; importedFrom: string | null }
+  verification?: { lastSmokeTest: number | null; result: 'pass' | 'fail' | 'unverified' }
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
@@ -124,6 +129,119 @@ export function loadDynamicToolsInto(
   return loaded
 }
 
+// ── Versioning & rollback ─────────────────────────────────────────────────────
+// Every *content* change (description/params/body) archives the outgoing version to
+// .crucible/dynamic-tools/history/<name>/v<N>.json and bumps `version`. Usage-counter
+// writes (recordToolSuccess) go through plain saveDynamicTool and never bump.
+
+function historyDir(projectPath: string, name: string): string {
+  return path.join(dynamicToolsDir(projectPath), 'history', name)
+}
+
+function versionFile(projectPath: string, name: string, version: number): string {
+  return path.join(historyDir(projectPath, name), `v${version}.json`)
+}
+
+export function toolVersion(record: DynamicToolRecord): number {
+  return record.version ?? 1
+}
+
+function archiveVersion(projectPath: string, record: DynamicToolRecord): void {
+  const dir = historyDir(projectPath, record.name)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(versionFile(projectPath, record.name, toolVersion(record)), JSON.stringify(record, null, 2), 'utf-8')
+}
+
+export interface ToolVersionInfo {
+  version: number
+  createdAt: number
+  changeNote: string
+  current: boolean
+}
+
+/** All versions of a tool, oldest first. The live record is included and flagged. */
+export function listToolVersions(projectPath: string, name: string): ToolVersionInfo[] {
+  const current = loadDynamicTool(projectPath, name)
+  if (!current) return []
+  const out: ToolVersionInfo[] = []
+  try {
+    for (const f of fs.readdirSync(historyDir(projectPath, name))) {
+      const m = f.match(/^v(\d+)\.json$/)
+      if (!m) continue
+      try {
+        const rec: DynamicToolRecord = JSON.parse(fs.readFileSync(path.join(historyDir(projectPath, name), f), 'utf-8'))
+        out.push({ version: Number(m[1]), createdAt: rec.createdAt, changeNote: rec.changeNote ?? '', current: false })
+      } catch { /* skip corrupt archive */ }
+    }
+  } catch { /* no history dir yet */ }
+  // Archives may include the current version number from a prior rollback — the live record wins.
+  const filtered = out.filter(v => v.version !== toolVersion(current))
+  filtered.push({ version: toolVersion(current), createdAt: current.createdAt, changeNote: current.changeNote ?? '', current: true })
+  return filtered.sort((a, b) => a.version - b.version)
+}
+
+export function loadToolVersion(projectPath: string, name: string, version: number): DynamicToolRecord | null {
+  const current = loadDynamicTool(projectPath, name)
+  if (current && toolVersion(current) === version) return current
+  try {
+    return JSON.parse(fs.readFileSync(versionFile(projectPath, name, version), 'utf-8'))
+  } catch { return null }
+}
+
+/** Apply a content change as a new version. Archives the outgoing record first.
+ *  Caller is responsible for having compiled/smoke-tested the new body already. */
+export function updateDynamicTool(
+  projectPath: string,
+  name: string,
+  changes: Partial<Pick<DynamicToolRecord, 'description' | 'params' | 'body'>>,
+  changeNote: string,
+  verified: boolean,
+): DynamicToolRecord | null {
+  const current = loadDynamicTool(projectPath, name)
+  if (!current) return null
+  archiveVersion(projectPath, current)
+  const next: DynamicToolRecord = {
+    ...current,
+    ...changes,
+    version: toolVersion(current) + 1,
+    changeNote,
+    verification: { lastSmokeTest: Date.now(), result: verified ? 'pass' : 'unverified' },
+  }
+  saveDynamicTool(projectPath, next)
+  return next
+}
+
+/** Restore an archived version as the live one. The restored record becomes a NEW
+ *  version (history is append-only — rolling back never destroys the rolled-back-from
+ *  version, so a rollback can itself be rolled back). Returns null if the tool or the
+ *  requested version doesn't exist. Defaults to the version just below the current one. */
+export function rollbackDynamicTool(
+  projectPath: string,
+  name: string,
+  toVersionNum?: number,
+): DynamicToolRecord | null {
+  const current = loadDynamicTool(projectPath, name)
+  if (!current) return null
+  const target = toVersionNum ?? toolVersion(current) - 1
+  if (target < 1 || target === toolVersion(current)) return null
+  const restored = loadToolVersion(projectPath, name, target)
+  if (!restored) return null
+  archiveVersion(projectPath, current)
+  const next: DynamicToolRecord = {
+    ...restored,
+    // Keep live usage counters — they describe the tool, not the version.
+    useCount: current.useCount,
+    successCount: current.successCount,
+    lastUsed: current.lastUsed,
+    tier: current.tier,
+    graduationPending: current.graduationPending,
+    version: toolVersion(current) + 1,
+    changeNote: `rollback to v${target}`,
+  }
+  saveDynamicTool(projectPath, next)
+  return next
+}
+
 // ── I6 — Tool graduation ──────────────────────────────────────────────────────
 // Session → specialist: successCount ≥ 5 across sessions
 // Specialist → global: successCount ≥ 20 across tasks; requires triumvirate approval
@@ -176,6 +294,8 @@ export function dynamicToolStats(projectPath: string) {
       useCount: t.useCount,
       successCount: t.successCount ?? 0,
       tier: t.tier ?? 'session',
+      version: toolVersion(t),
+      verification: t.verification ?? { lastSmokeTest: null, result: 'unverified' },
       graduationPending: t.graduationPending ?? false,
       createdAt: t.createdAt,
       lastUsed: t.lastUsed,
