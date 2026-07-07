@@ -22,6 +22,11 @@ import { registry } from './src/CrucibleEngine/tools/registry'
 import { resolveLocalIntent, runLocalPlan } from './src/CrucibleEngine/agent/localIntentRouter'
 import { localFmPlan, runFmPlan } from './src/CrucibleEngine/agent/localFmPlanner'
 import { corpusFirstAnswer } from './src/CrucibleEngine/corpus/corpusFirst'
+import { getRegistry as getLocalModelsRegistry } from './src/CrucibleEngine/localModels/registry'
+import { route as routeLocalModels } from './src/CrucibleEngine/localModels/router'
+import { resolvePolicy as resolveLocalModelsPolicy } from './src/CrucibleEngine/localModels/policy'
+import { orchestrate as orchestrateLocalModels } from './src/CrucibleEngine/localModels/orchestrator'
+import { strengthen as strengthenLocalModels } from './src/CrucibleEngine/localModels/strengthen/index'
 import { fenceProtocolPrompt, parseFenceToolCall } from './src/CrucibleEngine/tools/protocol'
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
@@ -31,6 +36,8 @@ import { needsPlan, runPlannedTask } from './src/CrucibleEngine/agent/planner'
 import { defaultSystemPreamble } from './src/CrucibleEngine/agent/loop'
 import { extractSubtasks } from './src/CrucibleEngine/goalDecomposer'
 import { detectConversational, buildConversationalFallback, applyVoiceLayer } from './src/CrucibleEngine/conversationalMode'
+import { answerCountingQuery } from './src/CrucibleEngine/countingVerifier'
+import { verifyAndRepair } from './src/CrucibleEngine/baselineVerify'
 import { readScratch } from './src/CrucibleEngine/agent/taskScratchpad'
 import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools'
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
@@ -1881,6 +1888,29 @@ app.post('/api/chat', async (req, res) => {
   // Instant first token — client shows "Analyzing…" immediately, before any model work
   send({ type: 'thinking' })
 
+  // ── Layer 0 — Deterministic counting gate ─────────────────────────────────────
+  // "how many r's in strawberry" style questions are pure arithmetic, not
+  // generation. Free/local models routinely hallucinate on these — pattern-
+  // completing the previous answer instead of actually counting (see ROADMAP
+  // audit). Runs before A0/M1/full pipeline so it fires even with ensemble off,
+  // costs zero API calls, and is never wrong. "Verify, never guess" applied to
+  // the product itself, not just to our own audits.
+  if (mode !== 'agent' && mode !== 'seeker' && mode !== 'code') {
+    const countAns = answerCountingQuery(message ?? '')
+    if (countAns) {
+      debugBus.emit('pipeline', 'counting_gate', { needle: countAns.needle, haystack: countAns.haystack, count: countAns.count }, { severity: 'success', requestId })
+      send({ type: 'contract', promptType: 'factual', requiredStructure: [], forbiddenAntipatterns: [] })
+      send({ type: 'stage', stage: 1, status: 'start' })
+      send({ type: 'layer1', modelId: 'system/count-verifier', model: 'Crucible (verified)', text: countAns.text, done: true })
+      send({ type: 'stage', stage: 1, status: 'done' })
+      send({ type: 'synthesis', modelId: 'system/count-verifier', model: 'Crucible (verified)', text: countAns.text, done: true, replace: false })
+      send({ type: 'stage', stage: 5, status: 'done' })
+      patchActiveSessionRound(chatUser, chatRoundId, { synthesis: countAns.text, synthesisDone: true, synthStreaming: false })
+      res.write('data: [DONE]\n\n'); res.end()
+      return
+    }
+  }
+
   // ── A0 — Crucible-only path (ensemble opt-out) ────────────────────────────────
   // v3 redesign contract: when the client has NOT opted into the ensemble
   // (request body `ensemble:false`), answer strictly on-device and NEVER fan out to
@@ -1911,10 +1941,44 @@ app.post('/api/chat', async (req, res) => {
         ])
         if (corpusAns) {
           const domains = [...new Set(corpusAns.sources.map(s => s.domain))].join(', ')
-          const answerText = `${applyVoiceLayer(corpusAns.answer)}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
+          // Baseline verify — this path never reaches the full pipeline's Stage 5b
+          // verifier/critic, so it gets its own deterministic check + one cheap
+          // local repair pass instead of shipping the model's raw guess.
+          const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(corpusAns.answer),
+            (sys, usr) => callLocalModel(sys, usr, 8000))
+          if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_corpus', issues: vr.issues }, { severity: 'info', requestId })
+          const answerText = `${vr.text}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
           debugBus.emit('pipeline', 'local_only_corpus', { confidence: corpusAns.confidence, sources: corpusAns.sources.length }, { severity: 'success', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
+        }
+        // 1.5) Local ensemble — explicit multi-model opt-in (`localMode: 'all' | 'single'`
+        // in the request body). Purely additive: only fires when a client asks for it, so
+        // the default `localMode` unset / 'auto' behaviour below (single local-FM call) is
+        // unchanged for existing clients. See src/CrucibleEngine/localModels/ (Track B seam,
+        // COLLAB.md 2026-07-07).
+        if (req.body.localMode === 'all' || req.body.localMode === 'single') {
+          const localRegistry = getLocalModelsRegistry()
+          const policy = resolveLocalModelsPolicy({ requestMode: req.body.localMode, singleModelId: req.body.localModelId })
+          const decision = routeLocalModels(message, history, { registry: localRegistry, policy })
+          if (decision.modelIds.length > 0) {
+            const outputs = await orchestrateLocalModels(decision, message, { registry: localRegistry, history })
+            const result = strengthenLocalModels(message, outputs)
+            if (result.answer.trim()) {
+              // Baseline verify — this is another raw model-answer exit (same shape as
+              // the corpus-first/local-FM-synth branches above), so it gets the same
+              // deterministic check + one cheap same-model repair pass before shipping.
+              const vr = await verifyAndRepair(message, localPromptType, result.answer.trim(),
+                (sys, usr) => callLocalModel(sys, usr, 8000))
+              if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_ensemble', issues: vr.issues }, { severity: 'info', requestId })
+              const contributorLabel = result.contributors.join(', ') || 'local ensemble'
+              const answerText = `${vr.text}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
+              debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
+              emitLocal(answerText, 'local/ensemble', 'Crucible (on-device ensemble)')
+              return
+            }
+          }
+          // Ensemble produced nothing usable — fall through to the existing single-model path below.
         }
         // 2) Local-FM synthesis — corpus missed, still answer on-device, no external calls.
         const local = await callLocalModel(
@@ -1923,7 +1987,13 @@ app.post('/api/chat', async (req, res) => {
           30000,
         )
         if (local.trim()) {
-          const answerText = `${applyVoiceLayer(local.trim())}\n\n*Answered on-device by Crucible — no external models used.*`
+          // Same baseline verify+repair pass as the corpus branch above — this is
+          // the rawest exit point (a single small model, zero corpus grounding),
+          // so it is the one most likely to need a correction.
+          const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(local.trim()),
+            (sys, usr) => callLocalModel(sys, usr, 8000))
+          if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_synth', issues: vr.issues }, { severity: 'info', requestId })
+          const answerText = `${vr.text}\n\n*Answered on-device by Crucible — no external models used.*`
           debugBus.emit('pipeline', 'local_only_synth', { chars: local.length }, { severity: 'info', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
@@ -2076,11 +2146,19 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'contract', promptType: simplePT, requiredStructure: [], forbiddenAntipatterns: [] })
         send({ type: 'stage', stage: 1, status: 'start' })
         const t0s = Date.now()
-        const reply = await callModel(fastModel, [
+        const rawReply = await callModel(fastModel, [
           { role: 'system', content: 'Answer concisely and accurately in 1-3 sentences.' },
           { role: 'user', content: message },
         ], { requestId })
         const latencyMs = Date.now() - t0s
+        // Baseline verify — this tier exists specifically to skip the full
+        // pipeline's Stage 5b verifier/critic for speed, but "skip the pipeline"
+        // must never mean "skip verification entirely." One deterministic check
+        // + one cheap same-model repair pass, same as the A0 on-device-only path.
+        const vr = await verifyAndRepair(message, simplePT, rawReply,
+          (sys, usr) => callModel(fastModel, [{ role: 'system', content: sys }, { role: 'user', content: usr }], { requestId }))
+        const reply = vr.text
+        if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'triage_simple', issues: vr.issues }, { severity: 'info', requestId })
         send({ type: 'layer1', modelId: fastModel.id, model: fastModel.label, text: reply, done: true })
         send({ type: 'stage', stage: 1, status: 'done' })
         send({ type: 'synthesis', modelId: fastModel.id, model: fastModel.label, text: reply, done: true, replace: false })
@@ -2134,7 +2212,13 @@ app.post('/api/chat', async (req, res) => {
         console.log(`[Pipeline] Corpus-first HIT (conf ${corpusAns.confidence.toFixed(2)}) — answered offline, no API`)
         debugBus.emit('pipeline', 'corpus_first_answer', { confidence: corpusAns.confidence, sources: corpusAns.sources.length, domains: [...new Set(corpusAns.sources.map(s => s.domain))] }, { severity: 'success' })
         const domains = [...new Set(corpusAns.sources.map(s => s.domain))].join(', ')
-        const answerText = `${applyVoiceLayer(corpusAns.answer)}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
+        // Baseline verify — this Layer 1 gate returns before Stage 5b (domainVerify +
+        // critic + polish) ever runs, so it needs its own check + repair pass same as
+        // A0's corpus-first branch.
+        const vr = await verifyAndRepair(message, promptType, applyVoiceLayer(corpusAns.answer),
+          (sys, usr) => callLocalModel(sys, usr, 8000))
+        if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'layer1_corpus_first', issues: vr.issues }, { severity: 'info', requestId })
+        const answerText = `${vr.text}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
         // Mirror the proven offline-mode event shape so the client renders it identically.
         send({ type: 'contract', promptType, requiredStructure: [], forbiddenAntipatterns: [] })
         send({ type: 'corpus_first', confidence: corpusAns.confidence, sources: corpusAns.sources })
@@ -2265,9 +2349,19 @@ app.post('/api/chat', async (req, res) => {
       message,
       30000,
     )
-    const finalOfflineText = offlineText.trim()
+    let finalOfflineText = offlineText.trim()
       ? `[Offline — on-device only]\n\n${applyVoiceLayer(offlineText)}`
       : '[Offline — on-device model did not respond. Please check your connection and retry.]'
+    if (offlineText.trim()) {
+      // Baseline verify — same raw-single-model shape as A0's on-device-only path,
+      // just reached via "external pool tripped" instead of "ensemble off."
+      const vr = await verifyAndRepair(message, promptType, finalOfflineText,
+        (sys, usr) => callLocalModel(sys, usr, 8000))
+      if (vr.repaired) {
+        finalOfflineText = vr.text
+        debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'offline_mode', issues: vr.issues }, { severity: 'info', requestId })
+      }
+    }
     sendAndRecord({ type: 'layer1', modelId: 'local/apple-fm', model: 'Apple FM (offline)', text: finalOfflineText, done: true })
     sendAndRecord({ type: 'stage', stage: 1, status: 'done' })
     sendAndRecord({ type: 'synthesis', modelId: 'local/apple-fm', model: 'Apple FM (offline)', text: finalOfflineText, done: true, replace: false })
@@ -2526,9 +2620,9 @@ ${worldCtx}`
         // Light unify pass ONLY when the combined payload fits a safe budget;
         // above that, re-synthesis would truncate sections, so ship them as-is.
         let finalMultipart = joinedSections
+        const { models: synthModels } = selectModels(promptType, SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
         if (joinedSections.length <= 6000) {
           try {
-            const { models: synthModels } = selectModels(promptType, SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
             const polished = await withTimeout(
               callModel(synthModels[0], [
                 { role: 'system', content: withStaticPrefix('You are the final synthesis layer. The user asked a multi-part question. You have answers to each part. Polish and unify them into a cohesive response. Preserve all content and section structure. Plain text only, no emojis.') },
@@ -2539,6 +2633,17 @@ ${worldCtx}`
             )
             if (polished && polished.length > joinedSections.length * 0.5) finalMultipart = normalizeOutput(polished, { stripPreamble: true })
           } catch {}
+        }
+        // Baseline verify — sections are each answered independently and joined/polished
+        // here without ever reaching Stage 5b's domainVerify, so give the combined
+        // result the same check + repair pass as every other non-full-pipeline exit.
+        if (synthModels[0]) {
+          const vr = await verifyAndRepair(message, promptType, finalMultipart,
+            (sys, usr) => callModel(synthModels[0], [{ role: 'system', content: sys }, { role: 'user', content: usr }], { requestId }))
+          if (vr.repaired) {
+            finalMultipart = vr.text
+            debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'l2_workstreams', issues: vr.issues }, { severity: 'info', requestId })
+          }
         }
         sendAndRecord({ type: 'stage', stage: 1, status: 'done', avgScores: {} })
         sendAndRecord({ type: 'stage', stage: 5, status: 'done' })
@@ -3547,12 +3652,23 @@ ${worldCtx}`
         mpDeps,
         (event) => sendAndRecord({ type: event.type, ...event.data }),
       )
-      pipelineSynthesisText = mpResult.synthesis
+      // Baseline verify — deep mode REPLACES the answer Stage 5b already verified
+      // and polished with fresh dialectical content that has not itself been
+      // checked. Without this, deep mode could silently regress an already-good,
+      // already-verified answer into an unverified one.
+      let deepSynthesis = mpResult.synthesis
+      const vr = await verifyAndRepair(message, promptType, deepSynthesis,
+        (sys, usr) => callModel(activeSynthModel, [{ role: 'system', content: sys }, { role: 'user', content: usr }], { requestId }))
+      if (vr.repaired) {
+        deepSynthesis = vr.text
+        debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'masterpiece_deep', issues: vr.issues }, { severity: 'info', requestId })
+      }
+      pipelineSynthesisText = deepSynthesis
       sendAndRecord({
         type: 'synthesis',
         modelId: 'masterpiece',
         model: 'MASTERPIECE',
-        text: mpResult.synthesis,
+        text: deepSynthesis,
         done: true,
         replace: true,
       })
