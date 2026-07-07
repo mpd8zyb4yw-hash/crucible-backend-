@@ -101,17 +101,74 @@ export async function fetchSEP(slug: string): Promise<string | null> {
   return text.length > 2000 ? text : null
 }
 
+// C9 — PubMed abstracts via NCBI E-utilities, key-free (rate-limited to 3 req/s
+// without an API key, which the sequential per-topic driver already respects).
+// esearch for PMIDs, then efetch XML for title+abstract (regex-parsed — same
+// avoid-an-XML-parser convention as fetchArxiv above).
+export async function fetchPubMed(query: string, max = 10): Promise<Array<{ title: string; abstract: string }>> {
+  const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${max}&retmode=json`
+  const searchRaw = await fetchText(searchUrl)
+  if (!searchRaw) return []
+  let ids: string[] = []
+  try { ids = JSON.parse(searchRaw)?.esearchresult?.idlist ?? [] } catch { return [] }
+  if (ids.length === 0) return []
+
+  const fetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${ids.join(',')}&rettype=abstract&retmode=xml`
+  const xml = await fetchText(fetchUrl)
+  if (!xml) return []
+
+  const entries: Array<{ title: string; abstract: string }> = []
+  const re = /<PubmedArticle>([\s\S]*?)<\/PubmedArticle>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(xml)) !== null) {
+    const block = m[1]
+    const title = decodeEntities((block.match(/<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/)?.[1] ?? '')).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+    const abstractParts = [...block.matchAll(/<AbstractText[^>]*>([\s\S]*?)<\/AbstractText>/g)].map(x => decodeEntities(x[1]).replace(/<[^>]+>/g, ' '))
+    const abstract = abstractParts.join(' ').replace(/\s+/g, ' ').trim()
+    if (abstract.length > 200) entries.push({ title, abstract })
+  }
+  return entries
+}
+
+// C9 — GitHub top repos by topic, key-free (60 req/hr unauthenticated). Pulls
+// the README (raw.githubusercontent.com, no rate limit shared with the API
+// quota) from the highest-starred repos as a proxy for "official docs / code."
+export async function fetchGithubTopRepos(topic: string, max = 5): Promise<Array<{ repo: string; readme: string }>> {
+  const searchUrl = `https://api.github.com/search/repositories?q=topic:${encodeURIComponent(topic)}&sort=stars&order=desc&per_page=${max}`
+  const raw = await fetchText(searchUrl, 15000)
+  if (!raw) return []
+  let items: any[] = []
+  try { items = JSON.parse(raw)?.items ?? [] } catch { return [] }
+
+  const out: Array<{ repo: string; readme: string }> = []
+  for (const item of items) {
+    const fullName = item?.full_name
+    if (!fullName) continue
+    let readme: string | null = null
+    for (const branch of ['main', 'master']) {
+      readme = await fetchText(`https://raw.githubusercontent.com/${fullName}/${branch}/README.md`, 10000)
+      if (readme) break
+    }
+    if (readme && readme.length > 500) {
+      out.push({ repo: fullName, readme: stripHtml(readme).slice(0, 6000) })
+    }
+  }
+  return out
+}
+
 // ── Deliberate curation manifest ──────────────────────────────────────────────
 // Maps the spec's priority allocation to concrete, key-free fetches. Each entry's
 // reliability + staleness class are set per source type.
 interface ManifestEntry {
-  kind: 'gutenberg' | 'rfc' | 'arxiv' | 'sep'
+  kind: 'gutenberg' | 'rfc' | 'arxiv' | 'sep' | 'pubmed' | 'github'
   domain: string
   reliability: number
   staleness: SourceDoc['stalenessClass']
   ids?: number[]            // gutenberg ids / rfc numbers
   arxivCats?: string[]      // arxiv categories
   sepSlugs?: string[]       // SEP entry slugs
+  pubmedQueries?: string[]  // pubmed search terms
+  githubTopics?: string[]   // github topic tags
 }
 
 export const CURATION_MANIFEST: ManifestEntry[] = [
@@ -131,6 +188,15 @@ export const CURATION_MANIFEST: ManifestEntry[] = [
   // Priority 3/4 — formal reasoning & systems
   { kind: 'rfc', domain: 'networking', reliability: 0.85, staleness: 'engineering',
     ids: [791 /* IP */, 793 /* TCP */, 1122 /* host requirements */, 2616 /* HTTP/1.1 */, 5246 /* TLS */, 6455 /* WebSocket */, 7540 /* HTTP/2 */, 8446 /* TLS 1.3 */] },
+  // C9 — bulk key-free sources (deeper per-domain coverage toward 1GB)
+  { kind: 'pubmed', domain: 'biology', reliability: 0.85, staleness: 'scientific',
+    pubmedQueries: ['CRISPR gene editing', 'neural plasticity memory', 'gut microbiome', 'protein folding prediction', 'cancer immunotherapy'] },
+  { kind: 'pubmed', domain: 'cognitive-science', reliability: 0.85, staleness: 'scientific',
+    pubmedQueries: ['cognitive load working memory', 'decision making under uncertainty neuroscience'] },
+  { kind: 'github', domain: 'computer-science', reliability: 0.65, staleness: 'technology',
+    githubTopics: ['distributed-systems', 'compiler', 'machine-learning', 'database', 'operating-system'] },
+  { kind: 'github', domain: 'engineering', reliability: 0.65, staleness: 'technology',
+    githubTopics: ['systems-programming', 'networking'] },
 ]
 
 // ── Driver ────────────────────────────────────────────────────────────────────
@@ -170,6 +236,16 @@ export async function acquireDeliberately(deps: IngestDeps, opts: AcquireOptions
         for (const cat of entry.arxivCats ?? []) {
           const papers = await fetchArxiv(cat, 25)
           for (const p of papers) docs.push({ text: `${p.title}. ${p.abstract}`, domain: entry.domain, source: `arxiv:${cat}`, sourceReliability: entry.reliability, stalenessClass: entry.staleness })
+        }
+      } else if (entry.kind === 'pubmed') {
+        for (const query of entry.pubmedQueries ?? []) {
+          const papers = await fetchPubMed(query, 15)
+          for (const p of papers) docs.push({ text: `${p.title}. ${p.abstract}`, domain: entry.domain, source: `pubmed:${query}`, sourceReliability: entry.reliability, stalenessClass: entry.staleness })
+        }
+      } else if (entry.kind === 'github') {
+        for (const topic of entry.githubTopics ?? []) {
+          const repos = await fetchGithubTopRepos(topic, 5)
+          for (const r of repos) docs.push({ text: r.readme, domain: entry.domain, source: `github:${r.repo}`, sourceReliability: entry.reliability, stalenessClass: entry.staleness })
         }
       }
     } catch (e: any) {

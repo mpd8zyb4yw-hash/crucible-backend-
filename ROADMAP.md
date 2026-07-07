@@ -1346,6 +1346,22 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07e — C9: PubMed + GitHub-top-repos bulk corpus connectors
+Added two key-free connectors to `corpus/acquire.ts`: `fetchPubMed` (NCBI E-utilities
+esearch→efetch, XML regex-parsed, same convention as `fetchArxiv`) and `fetchGithubTopRepos`
+(GitHub search API for top-starred repos per topic + unauthenticated `raw.githubusercontent.com`
+README fetch). Wired into `CURATION_MANIFEST` — PubMed feeds biology/cognitive-science, GitHub
+feeds computer-science/engineering. Deliberately did not touch `src/CrucibleEngine/localModels/`
+(capability-gating/escalation/model-registry territory) — `COLLAB.md` shows it's actively owned
+by a concurrent agent (Track A/B) on branch `claude/vigilant-gauss-8ngw75`; extending it here
+would risk a collision with in-flight work on a file neither this branch nor that one has merged.
+
+Verification: `tsc -p tsconfig.server.json --noEmit` clean. GitHub connector verified fully live
+(`doocs/advanced-java`, `redis/redis` READMEs fetched and stripped correctly). PubMed's eutils
+host is blocked by this sandbox's proxy allowlist (confirmed 403, same pattern as R8) — its XML
+parsing was verified offline against a realistic multi-`AbstractText`-section fixture (PubMed's
+actual Background/Results-labelled abstract shape), title decode + entity-strip both correct.
+
 ### 2026-07-07d — Track R: Intelligent Web Research + Gap Detection (new, highest priority)
 Built the full feature: `src/CrucibleEngine/research/{types,sources,selector,gapDetector,
 webResearch,index}.ts`. Gap detector reuses Living Corpus signal already tracked by Track C
@@ -3395,7 +3411,13 @@ Project Gutenberg (classics), RFC editor (distributed-systems standards), arXiv 
   fallback otherwise), `recordMasterpieceOutcome` and `persistSurvivedConnections` (P15) close the
   feedback loop. Was marked incomplete in a prior audit pass; verified live in code — routing,
   fallback, and both feedback paths are wired into `orchestrator.ts`.
-- [ ] C9 — Bulk/keyed sources (SO dump, NASA NTRS, PubMed, GitHub top-500) + reach 1GB
+- [~] C9 — Bulk sources + reach 1GB. Key-free portion done: **PubMed** (`fetchPubMed` —
+  NCBI E-utilities esearch→efetch, XML regex-parsed same as arXiv, no key needed) and **GitHub
+  top-repos-by-topic** (`fetchGithubTopRepos` — search API + `raw.githubusercontent.com` README
+  fetch, unauthenticated) added to `CURATION_MANIFEST` (biology/cognitive-science via PubMed,
+  computer-science/engineering via GitHub topics). Still out of scope for the key-free driver,
+  per the original note: SO bulk dump and NASA NTRS need bulk-archive access or an API key —
+  unchanged from the prior audit.
 - [ ] C10 — App.tsx HOW-WE-GOT-HERE: contributing corpus domains (lands with Substrate)
 - [ ] C11 — ONNX embeddings (install `@xenova/transformers`) for 384-dim semantic quality
 
