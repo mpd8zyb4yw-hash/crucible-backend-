@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { API_BASE, apiFetch } from './api'
+import { API_BASE, apiFetch, getDeviceToken, setDeviceToken } from './api'
 import CrucibleMark from './CrucibleMark'
 import './modelData'
 import ReactMarkdown from 'react-markdown'
@@ -1267,6 +1267,207 @@ function CollapsibleCode({ language, code }: { language: string; code: string })
   )
 }
 
+// ── Connected Devices panel (design spec §5.2) ────────────────────────────────
+// Desktop: mint pairing codes, manage tiers, revoke any device. Phone: claim a
+// code to pair this browser as a remote device (token stored locally, sent as
+// x-crucible-device on every request), self-revoke as the kill switch.
+// Renders as a centered modal on desktop and a bottom sheet on mobile
+// (.crucible-sheet in mobile.css).
+interface DeviceRow { id: string; name: string; tier: string; createdAt: number; lastSeen: number | null; revokedAt: number | null }
+
+function DevicesPanel({ onClose }: { onClose: () => void }) {
+  const [devices, setDevices] = useState<DeviceRow[] | null>(null)
+  const [audit, setAudit] = useState<Array<{ ts?: number; deviceId: string; action: string; detail?: string; ok?: boolean }>>([])
+  const [showAudit, setShowAudit] = useState(false)
+  const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null)
+  const [claimCode, setClaimCode] = useState('')
+  const [claiming, setClaiming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const thisDeviceId = (() => { try { return localStorage.getItem('crucible_device_id') } catch { return null } })()
+  const paired = !!getDeviceToken()
+
+  const refresh = () => {
+    apiFetch(`${API_BASE}/api/devices`).then(r => r.json()).then(d => setDevices(d.devices ?? [])).catch(() => setDevices([]))
+    apiFetch(`${API_BASE}/api/devices/audit?n=30`).then(r => r.json()).then(d => setAudit((d.entries ?? []).reverse())).catch(() => {})
+  }
+  useEffect(refresh, [])
+
+  const mintCode = async () => {
+    setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/pair/start`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'could not create code'); return }
+      setPairCode(d)
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+  }
+
+  const claim = async () => {
+    setClaiming(true); setError(null)
+    try {
+      const name = /iPhone|iPad|Android/i.test(navigator.userAgent) ? 'phone' : 'browser'
+      const r = await apiFetch(`${API_BASE}/api/pair/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: claimCode.trim(), name: `${name} · ${new Date().toLocaleDateString()}` }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'pairing failed'); return }
+      setDeviceToken(d.token)
+      try { localStorage.setItem('crucible_device_id', d.id) } catch {}
+      setClaimCode('')
+      refresh()
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+    finally { setClaiming(false) }
+  }
+
+  const setTier = async (id: string, tier: string) => {
+    setError(null)
+    const r = await apiFetch(`${API_BASE}/api/devices/${id}/tier`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }),
+    })
+    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.error ?? 'tier change failed'); return }
+    refresh()
+  }
+
+  const revoke = async (id: string) => {
+    setError(null)
+    const r = await apiFetch(`${API_BASE}/api/devices/${id}/revoke`, { method: 'POST' })
+    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.error ?? 'revoke failed'); return }
+    if (id === thisDeviceId) { setDeviceToken(null); try { localStorage.removeItem('crucible_device_id') } catch {} }
+    refresh()
+  }
+
+  const tierColor: Record<string, string> = { observe: '#7c7cf8', build: '#fbbf24', full: '#f87171' }
+  const btn: React.CSSProperties = {
+    padding: '8px 14px', borderRadius: 9, fontSize: 12, fontWeight: 600,
+    border: '1px solid rgba(124,124,248,0.35)', background: 'rgba(124,124,248,0.12)',
+    color: '#c9c9ff', cursor: 'pointer', minHeight: 40,
+  }
+
+  return (
+    <>
+      <div className="crucible-sheet-scrim" onClick={onClose} style={{
+        position: 'fixed', inset: 0, zIndex: 190, background: 'rgba(0,0,0,0.55)',
+        animation: 'fadeIn 0.2s ease-out',
+      }} />
+      <div className="crucible-sheet" style={{
+        position: 'fixed', zIndex: 200, background: '#131318',
+        border: '1px solid rgba(255,255,255,0.09)',
+        display: 'flex', flexDirection: 'column', gap: 14,
+        padding: 18, overflowY: 'auto',
+        // Desktop default: centered modal. mobile.css turns this into a bottom sheet.
+        top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+        width: 'min(480px, 92vw)', maxHeight: '80vh', borderRadius: 16,
+        boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+        animation: 'panelUp 0.25s cubic-bezier(0.22,1,0.36,1)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#7c7cf8' }}>Connected Devices</span>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} aria-label="Close" style={{
+            background: 'none', border: 'none', cursor: 'pointer', color: '#666',
+            fontSize: 20, lineHeight: 1, padding: 8, minWidth: 40, minHeight: 40,
+          }}>×</button>
+        </div>
+
+        {/* Pair a new device (desktop mints; any surface can claim) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {!paired && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+              <input
+                value={claimCode}
+                onChange={e => setClaimCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="6-digit code"
+                inputMode="numeric"
+                style={{
+                  flex: '1 1 180px', minWidth: 0, padding: '10px 12px', borderRadius: 10, fontSize: 16,
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(124,124,248,0.25)',
+                  color: '#ddd', outline: 'none', letterSpacing: '0.2em', fontVariantNumeric: 'tabular-nums',
+                }}
+              />
+              <button disabled={claimCode.length !== 6 || claiming} onClick={claim} style={{ ...btn, opacity: claimCode.length === 6 && !claiming ? 1 : 0.4 }}>
+                pair this device
+              </button>
+            </div>
+          )}
+          {paired && (
+            <div style={{ fontSize: 12, color: '#4ade80' }}>This device is paired. Its tier is managed from the desktop.</div>
+          )}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+            <button onClick={mintCode} style={btn}>generate pairing code</button>
+            {pairCode && Date.now() < pairCode.expiresAt && (
+              <span style={{
+                fontSize: 22, fontWeight: 700, letterSpacing: '0.25em', color: '#e2e2ea',
+                fontVariantNumeric: 'tabular-nums', padding: '4px 10px',
+                background: 'rgba(124,124,248,0.1)', borderRadius: 10, border: '1px solid rgba(124,124,248,0.3)',
+              }}>{pairCode.code}</span>
+            )}
+            {pairCode && <span style={{ fontSize: 10.5, color: '#888' }}>valid 5 min, single use</span>}
+          </div>
+        </div>
+
+        {/* Device list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {devices === null && <div style={{ fontSize: 12, color: '#666' }}>loading…</div>}
+          {devices !== null && devices.filter(d => !d.revokedAt).length === 0 && (
+            <div style={{ fontSize: 12, color: '#666' }}>No paired devices yet.</div>
+          )}
+          {(devices ?? []).filter(d => !d.revokedAt).map(d => (
+            <div key={d.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const,
+              padding: '10px 12px', borderRadius: 12,
+              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)',
+            }}>
+              <div style={{ flex: '1 1 140px', minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: '#ddd', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                  {d.name}{d.id === thisDeviceId ? ' (this device)' : ''}
+                </div>
+                <div style={{ fontSize: 10, color: '#666' }}>
+                  {d.lastSeen ? `last seen ${new Date(d.lastSeen).toLocaleString()}` : 'never used'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {(['observe', 'build', 'full'] as const).map(t => (
+                  <button key={t} onClick={() => setTier(d.id, t)} style={{
+                    padding: '6px 10px', borderRadius: 8, fontSize: 10.5, fontWeight: 700,
+                    letterSpacing: '0.05em', textTransform: 'uppercase' as const, cursor: 'pointer', minHeight: 34,
+                    background: d.tier === t ? `${tierColor[t]}22` : 'transparent',
+                    border: `1px solid ${d.tier === t ? tierColor[t] : 'rgba(255,255,255,0.1)'}`,
+                    color: d.tier === t ? tierColor[t] : '#555',
+                  }}>{t}</button>
+                ))}
+              </div>
+              <button onClick={() => revoke(d.id)} style={{
+                padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', minHeight: 34,
+                background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.3)', color: '#f87171',
+              }}>revoke</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Audit log */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button onClick={() => setShowAudit(o => !o)} style={{
+            background: 'none', border: 'none', cursor: 'pointer', color: '#7c7cf8',
+            fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700,
+            textAlign: 'left' as const, padding: '4px 0', minHeight: 32,
+          }}>{showAudit ? 'hide audit log' : `audit log (${audit.length})`}</button>
+          {showAudit && audit.map((e, i) => (
+            <div key={i} style={{
+              fontSize: 10.5, fontFamily: 'ui-monospace, monospace', color: e.ok === false ? '#f87171' : '#888',
+              wordBreak: 'break-word' as const, padding: '2px 0',
+            }}>
+              {e.ts ? new Date(e.ts).toLocaleTimeString() : ''} · {e.action}{e.detail ? ` · ${e.detail}` : ''}
+            </div>
+          ))}
+        </div>
+
+        {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+      </div>
+    </>
+  )
+}
+
 // ── Tool builder card — drives /api/builder/* for one session ────────────────
 // The install button only exists in the DOM when the server says status is
 // 'verified'; the server refuses installs without a passed dry run anyway, so the
@@ -1694,6 +1895,7 @@ export default function App() {
   const [rounds, setRounds]               = useState<Round[]>([])
   const [input, setInput]                 = useState('')
   const [menuOpen, setMenuOpen]           = useState(false)
+  const [devicesOpen, setDevicesOpen]     = useState(false)
   const [thinking, setThinking]           = useState(false)
   // ── Agent live timer ──────────────────────────────────────────────────────
   const [agentStartTime, setAgentStartTime]   = useState<number | null>(null)
@@ -2395,6 +2597,7 @@ export default function App() {
     const decoder = new TextDecoder()
     let sseBuf = ''
     let builderRound = false   // set when the server routes this round to the tool builder
+    let sawAgentEvent = false  // true once a real agent event (not a lone 'final') arrives
 
     while (true) {
       const { done, value } = await reader.read()
@@ -2429,6 +2632,13 @@ export default function App() {
 
           // ── Agent loop events (Section 7) — fold through one reducer ────────
           if (AGENT_EVENT_TYPES.has(parsed.type)) {
+            // A lone 'final' with no preceding agent events (builder/refine error paths,
+            // simple replies) is just text — don't fabricate an empty agent panel for it.
+            if (parsed.type === 'final' && !sawAgentEvent) {
+              setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, synthesis: parsed.text ?? r.synthesis, synthesisDone: true }))
+              continue
+            }
+            if (parsed.type !== 'final') sawAgentEvent = true
             setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, agent: agentReducer(r.agent, parsed) }))
             if (parsed.type === 'final') {
               // Agent's final summary doubles as the round's synthesis text.
@@ -3276,6 +3486,7 @@ export default function App() {
       )}
 
       {/* ── Top bar ── */}
+      {devicesOpen && <DevicesPanel onClose={() => setDevicesOpen(false)} />}
       <div className="crucible-topbar" style={{
         height: 40, display: 'flex', alignItems: 'center', padding: '0 16px 0 80px',
         background: 'transparent', flexShrink: 0,
@@ -3415,13 +3626,27 @@ export default function App() {
             ))}
           </button>
           {menuOpen && (
-            <div style={{
+            <>
+            {/* Mobile-only scrim (display:none on desktop via mobile.css) */}
+            <div className="crucible-menu-scrim" onClick={() => setMenuOpen(false)} style={{ display: 'none' }} />
+            <div className="crucible-menu-panel" style={{
               position: 'absolute', top: '100%', right: 0, zIndex: 100,
               background: '#111114', border: '1px solid rgba(255,255,255,0.08)',
               borderRadius: 10, padding: '4px 0', minWidth: 200,
               boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
             }}>
               {[
+                {
+                  label: 'Connected Devices',
+                  action: () => setDevicesOpen(true),
+                  icon: (
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="1.5" y="3" width="9" height="7" rx="1"/>
+                      <path d="M4 12.5h4"/>
+                      <rect x="11" y="6" width="3.5" height="7" rx="1"/>
+                    </svg>
+                  ),
+                },
                 {
                   label: 'API Keys',
                   action: () => alert('API Keys — coming soon'),
@@ -3585,6 +3810,7 @@ export default function App() {
                 <span style={{ flex: 1 }}>About</span>
               </button>
             </div>
+            </>
           )}
         </div>
       </div>
@@ -3868,7 +4094,7 @@ export default function App() {
                     })()}
                   </div>
                   <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '10px -18px 12px' }} />
-                  <div style={{ fontSize: 13.5, lineHeight: 1.75, color: '#d8d8e8', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere' as const, wordBreak: 'break-word' as const, userSelect: 'text' as const }}>
+                  <div className="crucible-synthesis" style={{ fontSize: 13.5, lineHeight: 1.75, color: '#d8d8e8', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere' as const, wordBreak: 'break-word' as const, userSelect: 'text' as const }}>
                    <ReactMarkdown
                      components={{
                        pre({ children }: any) { return <>{children}</> },

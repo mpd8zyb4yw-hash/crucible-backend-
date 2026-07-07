@@ -1346,6 +1346,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07j — Connected Devices UI + mobile interface revamp
+
+Two fronts, both verified with Playwright screenshots at 390x844 (touch) and 1280x800:
+
+**Connected Devices (completes 07i's usable surface):**
+- `src/api.ts`: device credential stored locally, sent as `x-crucible-device` on every
+  `apiFetch`; `getDeviceToken`/`setDeviceToken`.
+- `DevicesPanel` (App.tsx, menu → Connected Devices): desktop mints the 6-digit code (big
+  tabular display, "valid 5 min, single use"), any surface claims with the code, tier chips
+  (observe/build/full) desktop-managed, revoke from either side, collapsible audit log.
+  Centered modal on desktop, bottom sheet on mobile.
+- **Verified through the real UI**: a scripted two-context Playwright run paired a phone
+  context against a desktop-minted code, phone showed "This device is paired", desktop
+  raised the tier to build (chip state confirmed on screenshot), phone self-revoked.
+
+**Mobile revamp (mobile is a first-class surface, not the desktop layout shrunk):**
+- Hamburger dropdown → full-width bottom sheet with grab handle, scrim, 48px rows, safe-area
+  padding (`.crucible-menu-panel/-scrim` in mobile.css; desktop dropdown unchanged). Required
+  raising `.crucible-topbar` z-index above the input bar on mobile — the sheet lives inside
+  the topbar's stacking context and was painting under the composer (caught on screenshot,
+  fixed, re-verified).
+- Reading type scale: synthesis 15px/1.7 (`.crucible-synthesis` hook), user bubble 15px,
+  proper mobile heading sizes. Desktop keeps its denser 13.5px.
+- Send button 26px → 38px thumb target; composer 22px radius; model cards strip slimmed to a
+  compact status readout; sheet pattern (`.crucible-sheet`) shared by all future panels.
+- Bug found by the screenshot pass and fixed: a lone SSE `final` (builder/refine error
+  paths) fabricated an empty "agent finished" panel via the agent reducer — now a `final`
+  with no preceding agent events just sets the answer text (re-verified: panel gone).
+- Frontend typecheck clean throughout.
+
+Remaining mobile polish candidates: history drawer + governance panel to the sheet pattern,
+keyboard-open composer behavior on real iOS (visualViewport path exists but untested here).
+
 ### 2026-07-07i — Remote Brain: device pairing, permission tiers, audit log, kill switch (design-spec item 4, §5.2)
 
 New `src/CrucibleEngine/remoteDevices.ts` + server wiring. Backend complete and E2E-verified
