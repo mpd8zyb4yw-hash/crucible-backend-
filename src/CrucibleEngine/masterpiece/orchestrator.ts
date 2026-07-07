@@ -22,6 +22,8 @@ import { findStructuralResonances, detectLocalStructuralPatterns } from './struc
 import { evaluateEscalation } from './escalation.js'
 import { refineShard } from './moe.js'
 import { recordCalibration, recordLightSignal, getPathWeight } from './calibration.js'
+import { researchGapIfNeeded, formatEvidenceBlock, ingestResearchFindings } from '../research/webResearch.js'
+import type { ResearchOutcome } from '../research/types.js'
 import type {
   GroundTruthAnchor,
   MasterpieceDeps,
@@ -30,11 +32,15 @@ import type {
   LightConnection,
   RefinedShard,
   EscalationDecision,
+  Shard,
 } from './types.js'
 
 export type MasterpieceSSEType =
   | 'masterpiece_start'
   | 'masterpiece_shard'
+  | 'masterpiece_shard_progress'
+  | 'masterpiece_research_gap'
+  | 'masterpiece_research'
   | 'masterpiece_triadic'
   | 'masterpiece_abductive'
   | 'masterpiece_escalation'
@@ -210,12 +216,54 @@ export async function runMasterpieceDeep(
     data: { shardCount: shards.length, shards: shards.map(s => ({ id: s.id, domain: s.domain, preview: s.content.slice(0, 80) })) },
   })
 
+  // ── Gap detection + targeted web research (Track R) ────────────────────
+  // Per shard: does the corpus actually know this, or is MASTERPIECE about to
+  // pattern-match through a hole? Runs before the dialectical pass so any
+  // fresh evidence reaches thesis/antithesis/middle-ground, not bolted on after.
+  const researchOutcomes: Array<ResearchOutcome | null> = await Promise.all(
+    shards.map(shard => researchGapIfNeeded(shard.content, shard.domain).catch(() => null)),
+  )
+
+  researchOutcomes.forEach((outcome, i) => {
+    if (!outcome) return
+    emit({
+      type: 'masterpiece_research_gap',
+      data: { shardId: shards[i].id, domain: shards[i].domain, hasGap: outcome.gap.hasGap, reason: outcome.gap.reason },
+    })
+    if (outcome.findings.length) {
+      emit({
+        type: 'masterpiece_research',
+        data: {
+          shardId: shards[i].id,
+          domainClass: outcome.domainClass,
+          sources: outcome.findings.map(f => f.source),
+          count: outcome.findings.length,
+        },
+      })
+    }
+  })
+
+  // Feed the evidence into the shard content itself — runTriadic only ever
+  // sees shard.content, so this is the one insertion point that reaches all
+  // three dialectical perspectives without duplicating call sites.
+  const researchedShards: Shard[] = shards.map((shard, i) => {
+    const outcome = researchOutcomes[i]
+    if (!outcome?.findings.length) return shard
+    return { ...shard, content: `${shard.content}\n\n${formatEvidenceBlock(outcome.findings)}` }
+  })
+
+  // Feedback loop: high-authority findings auto-ingest into the Living Corpus
+  // so the next query on this gap is answered locally. Fire-and-forget.
+  ingestResearchFindings(researchOutcomes, shards.map(s => s.domain), {
+    callModel: deps.callModel,
+  }).catch(() => {})
+
   // ── BLOCK 1: triadic (global parallel), then abductive + structural ────
   // P12 — emit per-shard progress as each shard's triadic pass completes,
   // so the UI can show a live indicator during deep-mode processing.
   let shardsCompleted = 0
   const triadicOutputs = await Promise.all(
-    shards.map(async (shard, i) => {
+    researchedShards.map(async (shard, i) => {
       const { runTriadic } = await import('./triadic.js')
       const result = await runTriadic(shard, deps)
       shardsCompleted++
@@ -324,13 +372,11 @@ export async function runMasterpieceDeep(
         .join('\n')
     : ''
 
-  synthesis = ensembleSynthesis + connectionInsights
-
   // No model call for assembly — concatenate refined shards directly.
   // This avoids coding models reformatting prose as // comments regardless
   // of prompt instructions. The refined shards are already high quality
   // from the MoE specialist pass; a model call adds latency and format risk.
-  let synthesis: string
+  let synthesis: string = ensembleSynthesis + connectionInsights
 
   // Strip code-comment formatting if a coding model wrapped the synthesis in // notation.
   // This is a safety net — the assembler prompt now prohibits it, but defense in depth.
@@ -375,6 +421,8 @@ export async function runMasterpieceDeep(
     escalatedShardCount: escalatedCount,
     elapsedMs: Date.now() - start,
     refinedShards,
+    researchGapsDetected: researchOutcomes.filter(Boolean).length,
+    researchFindingsUsed: researchOutcomes.reduce((s, o) => s + (o?.findings.length ?? 0), 0),
   }
 
   emit({ type: 'masterpiece_complete', data: { ...result, synthesis: undefined, refinedShards: undefined } })

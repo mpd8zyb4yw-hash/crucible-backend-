@@ -1346,6 +1346,56 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07e — C9: PubMed + GitHub-top-repos bulk corpus connectors
+Added two key-free connectors to `corpus/acquire.ts`: `fetchPubMed` (NCBI E-utilities
+esearch→efetch, XML regex-parsed, same convention as `fetchArxiv`) and `fetchGithubTopRepos`
+(GitHub search API for top-starred repos per topic + unauthenticated `raw.githubusercontent.com`
+README fetch). Wired into `CURATION_MANIFEST` — PubMed feeds biology/cognitive-science, GitHub
+feeds computer-science/engineering. Deliberately did not touch `src/CrucibleEngine/localModels/`
+(capability-gating/escalation/model-registry territory) — `COLLAB.md` shows it's actively owned
+by a concurrent agent (Track A/B) on branch `claude/vigilant-gauss-8ngw75`; extending it here
+would risk a collision with in-flight work on a file neither this branch nor that one has merged.
+
+Verification: `tsc -p tsconfig.server.json --noEmit` clean. GitHub connector verified fully live
+(`doocs/advanced-java`, `redis/redis` READMEs fetched and stripped correctly). PubMed's eutils
+host is blocked by this sandbox's proxy allowlist (confirmed 403, same pattern as R8) — its XML
+parsing was verified offline against a realistic multi-`AbstractText`-section fixture (PubMed's
+actual Background/Results-labelled abstract shape), title decode + entity-strip both correct.
+
+### 2026-07-07d — Track R: Intelligent Web Research + Gap Detection (new, highest priority)
+Built the full feature: `src/CrucibleEngine/research/{types,sources,selector,gapDetector,
+webResearch,index}.ts`. Gap detector reuses Living Corpus signal already tracked by Track C
+(retrieval hit count/similarity + `coverage_gaps.priority_score`) instead of building a second
+bookkeeping system — a query is a "gap" when it's time-dependent, corpus hits are sparse, or its
+domain is already a known deficit. Source selector classifies queries into academic/
+current-events/technical/curated and picks trustworthy key-free fetchers per class: arXiv, Hacker
+News, Stack Overflow, GitHub, Wikipedia, DuckDuckGo — all real HTTP, regex/JSON-parsed, no new
+dependencies (matches the existing `academicRetrieval.ts`/`corpus/acquire.ts` convention). Wired
+into MASTERPIECE deep mode *before* the triadic dialectical pass: gap check runs per shard, and
+any findings are appended into `shard.content` so thesis/antithesis/middle-ground all read the
+same fresh, source-tagged evidence — not bolted on after synthesis. New SSE events
+`masterpiece_research_gap`/`masterpiece_research`. Feedback loop: findings with authority ≥ 0.6
+auto-ingest into the Living Corpus through the same chunk→embed→dedup→validate pipeline every
+other document uses, so the next query on the same gap is answered locally. Also added a
+`web_research` agent tool (registry.ts) and `GET /api/research/status` / `POST /api/research/query`.
+
+While wiring this in, found and fixed a real pre-existing bug directly in the code path this
+feature depends on: `masterpiece/orchestrator.ts` assigned `synthesis` before its `let`
+declaration — a TDZ `ReferenceError` that would throw on every deep-mode completion (deep mode
+was silently unable to ever finish). Reordered to declare-with-initializer. Also added the
+missing `masterpiece_shard_progress` member to `MasterpieceSSEType` (P12 already emitted it, the
+type never listed it). Corrected Track C's C8 status to `[x]` — `masterpiece/corpus/living.ts`
+already fully implements the MASTERPIECE↔Living-Corpus bridge (verified in code, not just
+assumed from the stale checkbox).
+
+Verification: `tsc -p tsconfig.server.json --noEmit` clean on all new/changed files. Source
+classification + evidence formatting verified live. Of the 6 fetchers, GitHub's was verified
+fully live (real HTTP round-trip + parse); the other 5 (arXiv/HN/StackExchange/Wikipedia/DDG)
+are blocked by this sandbox's outbound proxy allowlist (confirmed via `__agentproxy/status` —
+explicit policy-denial 403s, not a code issue) — their parsing logic was verified offline against
+realistic fixture payloads instead. Flagged as R8 in the roadmap: needs one live run with open
+network egress to confirm all six end-to-end.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
@@ -3356,10 +3406,106 @@ Project Gutenberg (classics), RFC editor (distributed-systems standards), arXiv 
 - [x] C5 — Retrieval surface (semantic + relationship expansion + performance feedback)
 - [x] C6 — Governance audit log (every decision recorded)
 - [x] C7 — Server wiring (startup init, `/api/corpus/status`, `/api/corpus/acquire`) — verified live
-- [ ] C8 — MASTERPIECE↔living-corpus query integration (route deep-mode abductive queries here)
-- [ ] C9 — Bulk/keyed sources (SO dump, NASA NTRS, PubMed, GitHub top-500) + reach 1GB
+- [x] C8 — MASTERPIECE↔living-corpus query integration — `masterpiece/corpus/living.ts` bridges
+  `queryCrossCorpusBridge`/`queryCorpusBridge` (living corpus when ≥50 active chunks, seed corpus
+  fallback otherwise), `recordMasterpieceOutcome` and `persistSurvivedConnections` (P15) close the
+  feedback loop. Was marked incomplete in a prior audit pass; verified live in code — routing,
+  fallback, and both feedback paths are wired into `orchestrator.ts`.
+- [~] C9 — Bulk sources + reach 1GB. Key-free portion done: **PubMed** (`fetchPubMed` —
+  NCBI E-utilities esearch→efetch, XML regex-parsed same as arXiv, no key needed) and **GitHub
+  top-repos-by-topic** (`fetchGithubTopRepos` — search API + `raw.githubusercontent.com` README
+  fetch, unauthenticated) added to `CURATION_MANIFEST` (biology/cognitive-science via PubMed,
+  computer-science/engineering via GitHub topics). Still out of scope for the key-free driver,
+  per the original note: SO bulk dump and NASA NTRS need bulk-archive access or an API key —
+  unchanged from the prior audit.
 - [ ] C10 — App.tsx HOW-WE-GOT-HERE: contributing corpus domains (lands with Substrate)
 - [ ] C11 — ONNX embeddings (install `@xenova/transformers`) for 384-dim semantic quality
+
+## Track R — INTELLIGENT WEB RESEARCH + GAP DETECTION
+**The system becomes self-aware about what it doesn't know, and fixes it live.** Sits directly
+in front of the MASTERPIECE deep-mode dialectical pass — a gap check runs per shard, and any
+findings are folded into the shard's content before thesis/antithesis/middle-ground read it, so
+fresh evidence reaches the reasoning itself rather than getting appended after the fact.
+
+### Gap detector (`gapDetector.ts`)
+Deliberately reuses signal the Living Corpus (Track C) already tracks instead of inventing a
+second bookkeeping system: `queryLivingCorpus` hit count + average similarity (retrieval
+strength), and `coverage_gaps.priority_score` from `auditGaps()` (the corpus's own staleness/
+retrieval-hit-rate/per-domain deficit signal). A query is flagged as a gap when it is
+time-dependent (`isTimeDependent`, reused from `webGrounding.ts`), OR corpus hits are sparse
+(< 2 hits or avg similarity < 0.22), OR the shard's domain is already a known coverage gap
+(priority > 0.5). Returns a `GapSignal` with a human-readable reason — this is the literal
+"corpus has none" flag surfaced mid-reasoning.
+
+### Source selector (`selector.ts`)
+Classifies the query into `academic | current-events | technical | curated` via keyword
+heuristics, then picks an ordered, domain-appropriate fetcher list — never a generic web search
+first:
+- **academic** → arXiv, then Hacker News
+- **current-events** → Hacker News, then general web (DuckDuckGo)
+- **technical** → Stack Overflow, then GitHub
+- **curated** → Wikipedia, then general web
+
+### Fetchers (`sources.ts`) — all key-free, all real HTTP, no new dependencies
+arXiv (Atom API, regex-parsed — matches the existing `academicRetrieval.ts` convention of
+avoiding an XML parser dependency), Hacker News (Algolia search API), Stack Overflow
+(`api.stackexchange.com` advanced search, 300 req/day unauthenticated), GitHub (public repo
+search, 60 req/hr unauthenticated), Wikipedia (REST search API), general web (DuckDuckGo HTML
+scrape, same regex-extraction style as the `web_search` agent tool). Every fetcher degrades to
+`[]` on any error — a failed source never breaks the pipeline. Each `ResearchFinding` carries a
+source-appropriate `authorityScore` (arXiv/StackOverflow ~0.85-0.9 ceiling, Wikipedia fixed 0.65,
+general web fixed 0.35, HN/GitHub/StackOverflow scaled by points/stars/score) and `publishedAt`
+where the source exposes a real date.
+
+### Integration into reasoning (`webResearch.ts` + `masterpiece/orchestrator.ts`)
+`researchGapIfNeeded(shardContent, domain)` runs the gap check, and only fetches when a gap is
+real. Findings are rendered via `formatEvidenceBlock` — each line tagged with source, authority
+score, and recency (`today` / `Nd old` / `Nmo old` / `Ny old`) — and appended directly to
+`shard.content` before `runAllTriadic`'s per-shard call, so thesis, antithesis, AND
+middle-ground all read the same fresh evidence, not a post-hoc synthesis note. Emits
+`masterpiece_research_gap` (per shard: domain, hasGap, reason) and `masterpiece_research`
+(sources hit, finding count) to the SSE stream, following the existing `masterpiece_*` event
+convention. `MasterpieceResult` gained `researchGapsDetected`/`researchFindingsUsed` for
+transparency.
+
+### Feedback loop (`ingestResearchFindings`)
+Findings with `authorityScore ≥ 0.6` auto-ingest into the Living Corpus (`ingestDocument`, same
+chunk→embed→dedup→validate pipeline every other document goes through — no shortcut), tagged
+`webresearch:<source>:<url>` with a staleness class derived from the domain classification
+(academic→scientific, current-events→current, technical→technology, curated→permanent).
+Fire-and-forget, never blocks the response. Closes the loop: the next query touching the same
+gap is answered from the corpus instead of re-fetching.
+
+### Tool + endpoints
+- `web_research` agent tool (`tools/registry.ts`) — same source-selection logic, ungated (the
+  agent already decided it wants live sources), registered alongside `web_search`/`search_youtube`.
+- `GET /api/research/status` — per-domain coverage gaps sorted by priority (same data the gap
+  detector reads).
+- `POST /api/research/query` — manual trigger for debugging.
+
+### Files
+`src/CrucibleEngine/research/`: `types.ts`, `sources.ts` (6 fetchers), `selector.ts` (domain
+classifier + source ordering), `gapDetector.ts` (corpus-signal-based gap check), `webResearch.ts`
+(orchestration + evidence formatting + feedback ingest), `index.ts` (public exports).
+
+### Status
+- [x] R1 — Gap detector reusing Living Corpus retrieval/staleness/coverage-gap signal
+- [x] R2 — Source selector (academic/current-events/technical/curated → ordered fetchers)
+- [x] R3 — Six key-free fetchers (arXiv, HN, Stack Overflow, GitHub, Wikipedia, DDG web)
+- [x] R4 — Wired into MASTERPIECE deep mode pre-triadic, evidence reaches all three dialectical
+  perspectives, `masterpiece_research_gap`/`masterpiece_research` SSE events
+- [x] R5 — Feedback loop: high-authority findings auto-ingest into Living Corpus
+- [x] R6 — `web_research` agent tool + `/api/research/status` + `/api/research/query`
+- [x] R7 — Fixed a pre-existing crash found while wiring this in: `orchestrator.ts` assigned
+  `synthesis` before its `let` declaration (TDZ `ReferenceError` on every deep-mode completion)
+  — reordered to declare-with-initializer. Also added the missing `masterpiece_shard_progress`
+  member to `MasterpieceSSEType` (P12 emitted it but the type never included it).
+- [ ] R8 — Live network verification: this sandbox's outbound proxy allowlists GitHub but
+  blocks arXiv/Stack Exchange/Wikipedia/DuckDuckGo (confirmed via `__agentproxy/status` —
+  explicit `connect_rejected` policy denials). GitHub fetch + parse verified live end-to-end;
+  the other five fetchers' parsing logic was verified offline against realistic fixture
+  payloads (real Atom XML / JSON shapes) since the hosts are unreachable from here. Needs a
+  live run in an environment with open outbound network to confirm all six end-to-end.
 
 ## SPECIAL TRACK — Q: SUBSTRATE (model viability / diversity / hot-swap)
 
