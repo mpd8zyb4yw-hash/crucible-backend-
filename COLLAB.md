@@ -105,10 +105,27 @@ one committed to `main` first wins; the second agent adapts and notes it.
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
 | _(none — App.tsx lock RELEASED)_ | | A1 is done on branch `phase-a1-frontend`, typecheck-verified, awaiting a boot-test before merge (see §5). Whoever can run the app: boot-test it, then merge. | |
+| Agent B (Track B) | `src/CrucibleEngine/localModels/{router,orchestrator,policy}.ts`, the `server.ts` A0-block seam (~L1918-2003) | On-device multi-model ensemble effort, Track B (router/orchestrator/wiring) of Justin's 4-track split. Landed on branch `claude/vigilant-gauss-8ngw75`, not `main` — see note below. | 2026-07-07 |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
 existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/chat` body.
+
+**New effort (2026-07-07): on-device multi-model ensemble (SmolLM2/Gemma ONNX + Apple FM),
+4 parallel tracks (A: runtime/registry, B: router/orchestrator/wiring, C: strengthen, D: UI/
+telemetry).** Lives entirely under a new `src/CrucibleEngine/localModels/` dir + one `server.ts`
+seam, same file-ownership-lock discipline as Phase A/B above. Full spec: whoever is running each
+track has the 4-part plan verbatim; if you're picking this up cold, ask Justin for it or read the
+committed `contracts.ts`/module doc-comments, which restate the ownership table.
+**Correction vs. the pasted plan** (2026-07-07, Track B): the plan was written against file paths
+that don't exist in *this* canonical repo — `src/modelData.ts` external registry is real, but
+`src/CrucibleEngine/agent/fmReact.ts`, `intentClassifier.ts`, `stakesRouter.ts`,
+`macCapabilities.ts` do not exist here. The real equivalents: `classifyPrompt()` in root
+`modelRegistry.ts` (same `PromptType`/`fit` shape the plan assumes), the Apple FM daemon is
+`local-inference/crucible-fm-daemon.swift` (port 11435, OpenAI-shaped, **non-streaming** —
+`generate()` yields one chunk, not a token stream), and the real `/api/chat` seam is the A0 block
+at `server.ts` ~L1918 (`req.body.ensemble === false` path), not ~L3267. No `PARALLEL_SYNC.md` file
+exists — this `COLLAB.md` is the shared coordination file; use it instead of creating a second one.
 
 ---
 
@@ -187,6 +204,17 @@ existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/
   Log). `npx tsc -p tsconfig.app.json --noEmit` clean. Kept OFF main pending a boot-test because
   it changes default runtime behavior and this sandbox can't run the live pipeline. Next: A3
   (chrome gating) + Phase B (animation).
+- **2026-07-07 · Agent B (Track B)** — Built `src/CrucibleEngine/localModels/{contracts,router,
+  policy,orchestrator}.ts` for the on-device multi-model ensemble effort (Track B of the 4-track
+  split). Also stood up provisional `registry.ts` (Track A) and `strengthen/index.ts` (Track C)
+  so the pipeline is real end-to-end today, clearly marked for those tracks to replace. Wired an
+  additive `req.body.localMode: 'all'|'single'` seam into the existing A0 block in `server.ts`
+  (~L1918) — fires only when a client opts in, so existing behavior (incl. the in-flight Phase A1
+  branch) is unchanged. Offline bench `__router_bench.ts` (13 assertions) all pass: auto/all/
+  single mode selection, RAM-budget subset capping, partial-result tolerance, per-model timeout.
+  `npx tsc -p tsconfig.server.json --noEmit` error count unchanged (145 before/after — same
+  pre-existing set, none new). Landed on branch `claude/vigilant-gauss-8ngw75` per this session's
+  harness constraints, not pushed to `main` directly — see Decisions Log.
 
 ---
 
@@ -216,3 +244,25 @@ existing pipeline. Field name is settled: **`ensemble`** (boolean) in the `/api/
   the irreversible/time-critical work (backend preservation, coordination hub) and produced a
   precise, verified, line-referenced Phase A plan that either agent can execute surgically. The
   actual `App.tsx`/`server.ts` edits happen in a focused pass with runtime verification, not blind.
+- **2026-07-07 · Agent B (Track B) · Wired the ensemble seam additively, not by replacing the
+  existing A0 single-model path.** The 4-track plan's spec ("replace the offline conversational
+  block") would have changed default behavior for a code path that's mid-flight (Phase A1 awaiting
+  boot-test). Instead I added a new opt-in branch inside the A0 block, gated on a brand-new
+  `req.body.localMode: 'all' | 'single'` field that no existing client sends — so nothing that
+  currently works changes, and the ensemble only fires when a client explicitly asks. `tsc`
+  error count unchanged (145→145, same pre-existing set) before/after my edit.
+- **2026-07-07 · Agent B (Track B) · Built provisional `registry.ts` and `strengthen/index.ts`
+  even though those are Track A's and Track C's rows, respectively.** Neither had landed yet and
+  Track B's contract (route→orchestrate→strengthen) can't be verified end-to-end without them.
+  Both are clearly marked as placeholders in their own header comments and only expose the shapes
+  `contracts.ts` promises — Track A/C should replace them wholesale, not patch around them.
+  `registry.ts` wraps the one real on-device model that exists today (Apple FM daemon);
+  `strengthen/index.ts` is a longest-successful-output best-of-1 pick.
+- **2026-07-07 · Agent B (Track B) · Pushed to a feature branch, not `main`, breaking with this
+  file's stated "one canonical branch: `main`" protocol.** My session's operating constraints
+  pin me to a single designated branch (`claude/vigilant-gauss-8ngw75`) and forbid pushing
+  elsewhere without explicit user permission — I can't unilaterally push straight to `main` the
+  way earlier entries in this log describe. Work is fully committed and pushed to that branch;
+  merging to `main` needs either an explicit ask to the user or another agent instance that isn't
+  under the same constraint. Flagging so whoever reconciles the 4 tracks knows this branch exists
+  and isn't stale/abandoned work.

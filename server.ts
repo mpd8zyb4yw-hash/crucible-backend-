@@ -22,6 +22,11 @@ import { registry } from './src/CrucibleEngine/tools/registry'
 import { resolveLocalIntent, runLocalPlan } from './src/CrucibleEngine/agent/localIntentRouter'
 import { localFmPlan, runFmPlan } from './src/CrucibleEngine/agent/localFmPlanner'
 import { corpusFirstAnswer } from './src/CrucibleEngine/corpus/corpusFirst'
+import { getRegistry as getLocalModelsRegistry } from './src/CrucibleEngine/localModels/registry'
+import { route as routeLocalModels } from './src/CrucibleEngine/localModels/router'
+import { resolvePolicy as resolveLocalModelsPolicy } from './src/CrucibleEngine/localModels/policy'
+import { orchestrate as orchestrateLocalModels } from './src/CrucibleEngine/localModels/orchestrator'
+import { strengthen as strengthenLocalModels } from './src/CrucibleEngine/localModels/strengthen/index'
 import { fenceProtocolPrompt, parseFenceToolCall } from './src/CrucibleEngine/tools/protocol'
 import type { ToolCtx } from './src/CrucibleEngine/tools/protocol'
 import { runAgentLoop } from './src/CrucibleEngine/agent/loop'
@@ -1946,6 +1951,28 @@ app.post('/api/chat', async (req, res) => {
           debugBus.emit('pipeline', 'local_only_corpus', { confidence: corpusAns.confidence, sources: corpusAns.sources.length }, { severity: 'success', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
+        }
+        // 1.5) Local ensemble — explicit multi-model opt-in (`localMode: 'all' | 'single'`
+        // in the request body). Purely additive: only fires when a client asks for it, so
+        // the default `localMode` unset / 'auto' behaviour below (single local-FM call) is
+        // unchanged for existing clients. See src/CrucibleEngine/localModels/ (Track B seam,
+        // COLLAB.md 2026-07-07).
+        if (req.body.localMode === 'all' || req.body.localMode === 'single') {
+          const localRegistry = getLocalModelsRegistry()
+          const policy = resolveLocalModelsPolicy({ requestMode: req.body.localMode, singleModelId: req.body.localModelId })
+          const decision = routeLocalModels(message, history, { registry: localRegistry, policy })
+          if (decision.modelIds.length > 0) {
+            const outputs = await orchestrateLocalModels(decision, message, { registry: localRegistry, history })
+            const result = strengthenLocalModels(message, outputs)
+            if (result.answer.trim()) {
+              const contributorLabel = result.contributors.join(', ') || 'local ensemble'
+              const answerText = `${result.answer}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
+              debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
+              emitLocal(answerText, 'local/ensemble', 'Crucible (on-device ensemble)')
+              return
+            }
+          }
+          // Ensemble produced nothing usable — fall through to the existing single-model path below.
         }
         // 2) Local-FM synthesis — corpus missed, still answer on-device, no external calls.
         const local = await callLocalModel(
