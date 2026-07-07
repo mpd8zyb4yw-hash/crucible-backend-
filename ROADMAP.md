@@ -1346,6 +1346,18 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07d — Design spec + gap analysis: Tool Builder, GitHub import, Refinement, Remote Brain
+
+Added `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md` — the full design spec for four
+systems (natural-language tool/agent builder, GitHub tool subscriptions/import, adaptive
+tool refinement, Remote Brain mobile command center) plus a code-verified gap analysis
+mapping each spec piece to what actually exists (`tools/registry.ts`, `tools/dynamicTools.ts`,
+`sandbox.ts`, `macTools.ts`, `agent/localIntentRouter.ts`, server.ts Step 9). Key findings:
+registry + dynamic tools + Remote Brain eyes/hands/stream exist; the user-facing builder
+dialogue, ToolSpec versioning/rollback, refinement smoke-test gate, device pairing/tiers,
+and all of GitHub import are not built. Doc ends with a recommended build order. No code
+changes this session.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
