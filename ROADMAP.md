@@ -1346,6 +1346,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07i — Remote Brain: device pairing, permission tiers, audit log, kill switch (design-spec item 4, §5.2)
+
+New `src/CrucibleEngine/remoteDevices.ts` + server wiring. Backend complete and E2E-verified
+over live HTTP (this subsystem needs no models, so the whole flow was actually driven):
+
+- **Pairing**: desktop (OAuth cookie only — a paired device cannot mint codes) POSTs
+  `/api/pair/start` → 6-digit code, 5-minute TTL, single-use. Phone POSTs `/api/pair/claim`
+  (the code is the auth) → long-lived credential returned exactly once; only its sha256 is
+  stored (`.crucible/remote-devices.json`). New devices always start at `observe` — more
+  access is an explicit desktop action, never part of pairing.
+- **Tiers (§5.2), enforced twice**: HTTP layer (observe = read-only GET whitelist; build/full
+  pass) and tool layer — `ToolCtx.deviceTier` flows through `/api/chat` into all four agent
+  execution paths (local intent, FM plan, planned task, agent loop) and `registry.exec`
+  denies per-tier: observe = no tools, build = no `run`/UI-control/deletes/moves
+  (`BUILD_TIER_DENIED_TOOLS`), full = all tools but destructive shell stays behind the
+  existing `allowDestructive` gate for EVERY tier (spec: "even inside Tier 3").
+- **Tier changes** are desktop-cookie-only (`POST /api/devices/:id/tier`); a device asking to
+  raise itself gets 403 (verified live).
+- **Kill switch**: `POST /api/devices/:id/revoke` from the desktop or from the device itself;
+  tokens are re-verified per request so revocation is immediate (verified: next request 401).
+- **Audit (§5.2)**: append-only `.crucible/remote-audit.jsonl` — pairing, tier changes, every
+  device HTTP call, every tool call (allowed AND denied) with ok flag. `GET /api/devices/audit`
+  from either surface; exportable (it's a file).
+- Verified: 24-assertion tsx test (single-use codes, hash-only storage, tier semantics,
+  registry.exec denial + audit entries, invalid-tier rejection, immediate revocation,
+  no-hash-leak in listings) all pass, plus a 10-step live HTTP E2E: mint → claim → observe
+  GET ok / POST chat 403 / self-tier-raise 403 → desktop raises to build → chat passes →
+  self-revoke → token dead → audit shows the full story including the DENIED lines.
+- Still open from §5.2: biometric step-up for full tier (needs the mobile client),
+  interactive confirm-taps for destructive ops (allowDestructive is currently a hard block
+  from remote, not a prompt), desktop "remote session active" indicator, and pairing/devices
+  UI (frontend). §5.3 relay hardening unchanged.
+
 ### 2026-07-07h — Adaptive tool refinement: NL edits with diff + mandatory before/after smoke test (design-spec item 3, §4.2/§4.3)
 
 New `src/CrucibleEngine/toolRefiner.ts` — "make reverse_text also uppercase the output":

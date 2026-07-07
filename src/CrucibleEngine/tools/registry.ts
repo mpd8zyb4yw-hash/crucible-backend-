@@ -11,6 +11,7 @@ import { appendGlobalMemory } from '../state/session'
 import { buildGraphDigest, findEntities, upsertEntity, touchEntities } from '../entityGraph'
 import { gFetch, googleServicesStatus } from './googleApis'
 import { getUITree, clickElement, typeText } from '../macTools'
+import { tierPermitsTool, appendAudit } from '../remoteDevices'
 
 const tools = new Map<string, ToolDef>()
 
@@ -41,11 +42,21 @@ export const registry = {
     if (def.mutates && ctx.allowMutation === false) {
       return { ok: false, output: `Tool ${call.name} mutates state and is not permitted in this context.` }
     }
+    // Remote Brain tier gate (design spec §5.2) — every denied and executed call is audited.
+    if (ctx.deviceTier && !tierPermitsTool(ctx.deviceTier, call.name)) {
+      const result = { ok: false, output: `Tool ${call.name} is not permitted at remote tier '${ctx.deviceTier}'. The desktop owner can raise this device's tier in Connected Devices.` }
+      if (ctx.deviceId) appendAudit(ctx.projectPath, { deviceId: ctx.deviceId, action: 'tool', detail: `${call.name} DENIED (tier ${ctx.deviceTier})`, ok: false })
+      ctx.emit?.({ type: 'tool_result', id: call.id, tool: call.name, ok: false, output: result.output })
+      return result
+    }
     if (ctx.signal?.aborted) return { ok: false, output: 'Cancelled.' }
     checkpointBeforeMutation(call.name, ctx)
     ctx.emit?.({ type: 'tool_call', id: call.id, tool: call.name, args: call.args })
     try {
       const result = await def.run(call.args, ctx)
+      if (ctx.deviceTier && ctx.deviceId) {
+        appendAudit(ctx.projectPath, { deviceId: ctx.deviceId, action: 'tool', detail: `${call.name} ${JSON.stringify(call.args).slice(0, 200)}`, ok: result.ok })
+      }
       ctx.emit?.({ type: 'tool_result', id: call.id, tool: call.name, ok: result.ok, output: result.output.slice(0, 2000), truncated: result.truncated ?? false })
       return result
     } catch (e: any) {

@@ -44,6 +44,9 @@ export interface AgentLoopOpts {
   verify?: (finalText: string, ctx: ToolCtx) => Promise<VerifyResult>
   systemPreamble?: string
   allowMutation?: boolean
+  /** Remote Brain tier + device id when this request came from a paired device (§5.2). */
+  deviceTier?: 'observe' | 'build' | 'full'
+  deviceId?: string
   /** Resume from a saved checkpoint — used instead of the default [system, user] start. */
   initialMessages?: Array<Record<string, unknown>>
   /** Called after every iteration with current messages — for checkpoint persistence. */
@@ -136,6 +139,8 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
     emit,
     signal,
     allowMutation: opts.allowMutation ?? true,
+    deviceTier: opts.deviceTier,
+    deviceId: opts.deviceId,
     budget: { remainingTokens: budgetTokens },
     onFileMutated: opts.onFileMutated,
   }

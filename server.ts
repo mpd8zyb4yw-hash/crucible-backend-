@@ -46,6 +46,7 @@ import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchInde
 import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
 import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
 import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
+import { createPairingCode, claimPairingCode, verifyDeviceToken, listDevices, revokeDevice, setDeviceTier, readAudit, appendAudit as appendDeviceAudit, type RemoteDevice, type DeviceTier } from './src/CrucibleEngine/remoteDevices'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -477,11 +478,45 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   next()
 }
 
-// Auth guard — all /api/* except /api/auth/*, /api/screen-stream, and /api/diag
+// ── Remote Brain device auth (design spec §5.2) ──────────────────────────────
+// Paired devices authenticate with a long-lived token (x-crucible-device header or
+// crucible_device cookie) instead of the OAuth cookie. Tier is enforced here at the
+// HTTP layer (observe = read-only) and again per-tool in registry.exec.
+
+const DEVICE_BASE_DIR = process.cwd()
+
+function getRemoteDevice(req: express.Request): RemoteDevice | null {
+  const token = (req.headers['x-crucible-device'] as string) || parseCookies(req.headers.cookie ?? '')['crucible_device'] || ''
+  if (!token) return null
+  return verifyDeviceToken(DEVICE_BASE_DIR, token)
+}
+
+// Paths an 'observe'-tier device may reach (read-only surface).
+function observeTierAllowed(req: express.Request): boolean {
+  if (req.method !== 'GET') return false
+  return req.path === '/remote-brain/status' || req.path === '/diag'
+    || req.path.startsWith('/debug/') || req.path.startsWith('/devices')
+    || req.path === '/history' || req.path.startsWith('/task/')
+}
+
+// Auth guard — all /api/* except /api/auth/*, /api/screen-stream, /api/diag, and
+// /api/pair/claim (the pairing code IS the auth for that one call).
 app.use('/api', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (req.path.startsWith('/auth/')) return next()
   if (req.path === '/screen-stream') return next()   // no cookie on phone; LAN-only stream
   if (req.path === '/diag') return next()            // diagnostic endpoint — no auth needed
+  if (req.path === '/pair/claim') return next()      // claimed with a short-lived pairing code
+
+  const device = getRemoteDevice(req)
+  if (device) {
+    if (device.tier === 'observe' && !observeTierAllowed(req)) {
+      appendDeviceAudit(DEVICE_BASE_DIR, { deviceId: device.id, action: 'http', detail: `${req.method} ${req.path} DENIED (tier observe)`, ok: false })
+      return res.status(403).json({ error: `This device is paired at tier 'observe' (read-only). The desktop owner can raise its tier in Connected Devices.` })
+    }
+    ;(req as any).remoteDevice = device
+    appendDeviceAudit(DEVICE_BASE_DIR, { deviceId: device.id, action: 'http', detail: `${req.method} ${req.path}`, ok: true })
+    return next()
+  }
   return requireAuth(req, res, next)
 })
 
@@ -1693,6 +1728,12 @@ app.post('/api/chat', async (req, res) => {
       : newDesktopProjectPath()
     fs.mkdirSync(projectPath, { recursive: true })
 
+    // Remote Brain tier (§5.2): requests from a paired device carry its tier into
+    // every ToolCtx so registry.exec can enforce per-tool limits and audit calls.
+    const remoteDev = (req as any).remoteDevice as RemoteDevice | undefined
+    const deviceTier = remoteDev?.tier
+    const deviceId = remoteDev?.id
+
     const ac = new AbortController()
     // res 'close' fires on client disconnect; req 'close' fires once the body is
     // consumed in Express 5, which would falsely cancel the loop.
@@ -1769,7 +1810,7 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'agent_start', driver: 'on-device (no LLM)', projectPath, resumed: false })
         const toolCtx: ToolCtx = {
           projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-          allowMutation: true, allowDestructive: false, onFileMutated,
+          allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId,
         }
         try {
           const { ok, summary } = await runLocalPlan(localPlan, (call) => registry.exec(call, toolCtx))
@@ -1801,7 +1842,7 @@ app.post('/api/chat', async (req, res) => {
           send({ type: 'agent_start', driver: 'on-device FM (Layer 2)', projectPath, resumed: false })
           const toolCtx: ToolCtx = {
             projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-            allowMutation: true, allowDestructive: false, onFileMutated,
+            allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId,
           }
           const { ok, summary } = await runFmPlan(fmPlan, (call) => registry.exec(call, toolCtx))
           send({ type: 'final', text: summary })
@@ -1840,6 +1881,7 @@ app.post('/api/chat', async (req, res) => {
           ? { stepIndex: iterCheckpoint.stepIndex, messages: iterCheckpoint.messages }
           : undefined,
         onFileMutated,
+        deviceTier, deviceId,
       })
       // Clean up on success
       if (result.ok) {
@@ -1874,6 +1916,7 @@ app.post('/api/chat', async (req, res) => {
         ] : undefined),
         systemPreamble: `${defaultSystemPreamble(projectPath)}\n\nDEVICE CONTEXT: This request came from a ${device === 'mobile' ? 'mobile phone' : 'desktop'}. When the user asks to open apps, files, or URLs — always execute the action on the Mac desktop, never on the user's phone. If the request is ambiguous, assume they want it on the Mac.\n\nUSER LOCATION: Timezone is Europe/Rome. Use this to infer the user region for location-dependent queries like weather. Never ask for location unless the query is too specific for timezone inference.${detectExternalExecIntent(message ?? '') ? '\n\nEXECUTION INTENT DETECTED: The user wants you to perform an action on an external system (open a URL, play media, launch an app). Do NOT return a link or describe how to do it. Do NOT construct YouTube URLs from memory — video IDs from training data are dead links. For YouTube: call search_youtube with a specific query, pick the best result URL from the live results, then call open_app with that URL. For other media/apps: use web_search to find the URL, then open_app. Execute — do not instruct.' : ''}\n\n${[globalMemory, episodeContext, graphDigest, decisionCtx, memoryDigest, codebaseContext].filter(Boolean).join('\n\n')}`,
         onFileMutated,
+        deviceTier, deviceId,
         // Inject a fast text-only model call for model-assisted context compression
         compressCallModel: (msgs) => {
           const { models: compModels } = selectModels('general', SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
@@ -4480,6 +4523,56 @@ app.get('/api/screen-stream', (req, res) => {
     })
   }
   captureFrame()
+})
+
+// ── Remote Brain pairing & device management (design spec §5.2) ──────────────
+
+// POST /api/pair/start — desktop mints a 6-digit code (5 min, single-use).
+// Cookie-authenticated humans only: a paired device must not mint codes for other devices.
+app.post('/api/pair/start', (req, res) => {
+  if ((req as any).remoteDevice) { res.status(403).json({ error: 'Pairing codes can only be created from the desktop session.' }); return }
+  res.json(createPairingCode())
+})
+
+// POST /api/pair/claim — phone exchanges the code for its device credential.
+// The token in this response is shown exactly once and stored only as a hash.
+app.post('/api/pair/claim', (req, res) => {
+  const { code, name } = req.body ?? {}
+  const claimed = claimPairingCode(DEVICE_BASE_DIR, String(code ?? ''), String(name ?? ''))
+  if (!claimed) { res.status(400).json({ error: 'Invalid or expired pairing code.' }); return }
+  res.json(claimed)
+})
+
+// GET /api/devices — list paired devices (no token hashes). Visible from either surface.
+app.get('/api/devices', (_req, res) => {
+  res.json({ devices: listDevices(DEVICE_BASE_DIR) })
+})
+
+// POST /api/devices/:id/tier — tier changes are a desktop-owner action, never a device's.
+app.post('/api/devices/:id/tier', (req, res) => {
+  if ((req as any).remoteDevice) { res.status(403).json({ error: 'Tier changes require the desktop session.' }); return }
+  const tier = String(req.body?.tier ?? '') as DeviceTier
+  const ok = setDeviceTier(DEVICE_BASE_DIR, req.params.id, tier)
+  if (!ok) { res.status(400).json({ error: 'Unknown device or invalid tier (observe | build | full).' }); return }
+  res.json({ ok: true, id: req.params.id, tier })
+})
+
+// POST /api/devices/:id/revoke — the kill switch (§5.2): allowed from the desktop
+// session OR from the device itself, immediate on the next request.
+app.post('/api/devices/:id/revoke', (req, res) => {
+  const device = (req as any).remoteDevice as RemoteDevice | undefined
+  if (device && device.id !== req.params.id) {
+    res.status(403).json({ error: 'A device can only revoke itself; other devices are managed from the desktop.' }); return
+  }
+  const ok = revokeDevice(DEVICE_BASE_DIR, req.params.id)
+  if (!ok) { res.status(404).json({ error: 'Unknown or already-revoked device.' }); return }
+  res.json({ ok: true, id: req.params.id })
+})
+
+// GET /api/devices/audit — the remote audit log, viewable from either device (§5.2).
+app.get('/api/devices/audit', (req, res) => {
+  const n = Math.min(1000, Math.max(1, Number(req.query.n ?? 200)))
+  res.json({ entries: readAudit(DEVICE_BASE_DIR, n) })
 })
 
 // GET /api/remote-brain/status — check if Remote Brain tools are available

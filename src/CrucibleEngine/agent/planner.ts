@@ -98,6 +98,9 @@ export interface PlannedTaskOpts {
   resumeCheckpoint?: { stepIndex: number; messages: Array<Record<string, unknown>> }
   /** Called when a file-mutating tool writes; forwarded to runAgentLoop. */
   onFileMutated?: (absPaths: string[]) => void
+  /** Remote Brain tier + device id, forwarded to runAgentLoop (§5.2). */
+  deviceTier?: 'observe' | 'build' | 'full'
+  deviceId?: string
 }
 
 export interface PlannedTaskResult {
@@ -148,6 +151,8 @@ export async function runPlannedTask(opts: PlannedTaskOpts): Promise<PlannedTask
       stepIntent: step.intent,
       onCheckpoint: opts.onCheckpoint,
       onFileMutated: opts.onFileMutated,
+      deviceTier: opts.deviceTier,
+      deviceId: opts.deviceId,
       initialMessages: opts.resumeCheckpoint?.stepIndex === i
         ? opts.resumeCheckpoint.messages
         : undefined,

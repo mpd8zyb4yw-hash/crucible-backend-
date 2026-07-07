@@ -21,6 +21,13 @@ export interface ToolCtx {
    *  outside-root deletes, etc.). Defaults to false — destructive ops are blocked and the agent
    *  is told to surface them to the user (Section 8 — destructive op confirmation). */
   allowDestructive?: boolean
+  /** Remote Brain permission tier when this request came from a paired device
+   *  (design spec §5.2). Absent for desktop/local sessions. Enforced in registry.exec:
+   *  observe = no tools, build = no shell/UI-control/deletes, full = all (destructive
+   *  shell still gated by allowDestructive for every tier). */
+  deviceTier?: 'observe' | 'build' | 'full'
+  /** Device id for the remote audit log; set alongside deviceTier. */
+  deviceId?: string
   /** Called after a successful mutating tool call with the abs paths that were written.
    *  Used by the codebase indexer to stay fresh without coupling registry to codebaseIndex. */
   onFileMutated?: (absPaths: string[]) => void
