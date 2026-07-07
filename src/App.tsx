@@ -333,6 +333,8 @@ interface BuilderView {
   draft: { name: string; description: string; kind: string; triggerAliases: string[] } | null
   dryRun: { passed: boolean; transcript: Array<{ args: Record<string, unknown>; ok: boolean; output: string }>; error?: string } | null
   error?: string
+  /** §3.3 — matching tools from subscribed GitHub sources (suggestion, never a redirect). */
+  suggestions?: Array<{ repo: string; path: string; name: string; description: string; kind: string; license: string | null; updatedAt: string | null; defaultBranch: string }>
 }
 
 // ── Agent state (Section 7) — one reducer over the agent SSE event stream ─────
@@ -1476,6 +1478,7 @@ function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: Buil
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const call = async (path: string, body: Record<string, unknown>, label: string) => {
     setBusy(label); setError(null)
@@ -1525,6 +1528,44 @@ function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: Buil
 
       {view.restatement && (
         <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>{view.restatement}</div>
+      )}
+
+      {(view.suggestions?.length ?? 0) > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#4db89e' }}>
+            from your subscribed sources
+          </div>
+          {view.suggestions!.map((s, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const,
+              padding: '7px 10px', borderRadius: 10,
+              background: 'rgba(77,184,158,0.05)', border: '1px solid rgba(77,184,158,0.18)',
+            }}>
+              <div style={{ flex: '1 1 140px', minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: '#ddd', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{s.name}</div>
+                <div style={{ fontSize: 10, color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{s.repo} · {s.license ?? 'no license'}</div>
+              </div>
+              <button
+                disabled={!!busy}
+                onClick={async () => {
+                  setBusy('importing'); setError(null)
+                  try {
+                    const r = await apiFetch(`${API_BASE}/api/sources/import`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ card: s }),
+                    })
+                    const d = await r.json()
+                    if (!r.ok) { setError(d.error ?? 'import failed'); return }
+                    if (d.installed) setNotice(`Imported '${d.name}' from ${s.repo}.${d.warning ? ` Note: ${d.warning}` : ''}`)
+                    else setError(`Not imported: ${d.reason}`)
+                  } catch (e: any) { setError(e?.message ?? String(e)) }
+                  finally { setBusy(null) }
+                }}
+                style={btn(!busy)}
+              >import</button>
+            </div>
+          ))}
+        </div>
       )}
 
       {view.draft && (
@@ -1594,6 +1635,7 @@ function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: Buil
         </div>
       )}
 
+      {notice && <div style={{ fontSize: 11.5, color: '#4ade80', wordBreak: 'break-word' as const }}>{notice}</div>}
       {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
     </div>
   )
@@ -3817,7 +3859,7 @@ export default function App() {
 
       {/* N1 — Governance panel */}
       {govPanelOpen && (
-        <div style={{
+        <div className="crucible-sheet" style={{
           position: 'fixed', top: 50, right: 16, zIndex: 200, width: 340, maxHeight: '70vh',
           background: '#111114', border: '1px solid rgba(255,255,255,0.08)',
           borderRadius: 12, boxShadow: '0 16px 48px rgba(0,0,0,0.7)',

@@ -1346,6 +1346,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07k — GitHub tool sources: subscriptions, discovery index, builder surfacing, gated import (design-spec item 5, §3)
+
+New `src/CrucibleEngine/toolSources.ts` + server/frontend wiring — the last unstarted
+system from the design spec:
+
+- **Subscriptions (§3.1)**: `.crucible/tool-sources.json`, owner or owner/repo, validated +
+  normalized. `POST /api/sources/{add,remove}`, `GET /api/sources`.
+- **Index (§3.1/§3.2)**: `POST /api/sources/reindex` crawls subscriptions via the GitHub API
+  (unauthenticated free tier, or `GITHUB_TOKEN` when set) — repo tree → heuristic manifest
+  detection over folder conventions (`skills/`, `tools/`, `agents/`, `commands/`,
+  `.claude/skills/`), one card per tool with kind (code vs skill_md), SPDX license, branch.
+  **Unreachable repos are reported in `errors[]`, never silently indexed as 0 tools, and a
+  total outage never wipes a previously good index** (added after the live probe showed a
+  rate-limited crawl reporting "0 tools" as if it had succeeded).
+- **Search (§3.1 live mode)**: `GET /api/sources/search?q=` — stopworded ("tool" matches
+  every card path), stem-matched ("grills" → grill-me), scored.
+- **Builder surfacing (§3.3)**: the chat builder capture attaches the top 3 index matches to
+  the `builder_session` event; `BuilderCard` renders them as green suggestion rows with an
+  import button — a suggestion, never a redirect; the build flow continues regardless.
+- **Import (§3.4), gated like everything else**: license gate (no license → warn hard,
+  copyleft → warn, explicit disallow → block) → fetch source → the same compile+smoke gate.
+  skill_md tools are rejected honestly (no persona runtime yet); code that doesn't meet the
+  (args, ctx) → {ok, output} contract fails the gate with guidance to adapt via the builder.
+  Installed imports are v1 records with `provenance: imported` pointing at repo@branch:path
+  — versioning/rollback applies from birth.
+- Also this session: governance panel now uses the mobile sheet pattern (`crucible-sheet`).
+- Verified: 17-assertion tsx test with a fake GitHub (detection incl. `.claude/skills`,
+  noise rejection, license capture, search precision, all three import-rejection paths,
+  successful import running live in the registry, provenance format, duplicate rejection).
+  Frontend typecheck clean. Live endpoint probes worked end-to-end; the real crawl itself
+  is blocked in this dev sandbox (session proxy 403 / shared-IP rate limit), so crawling a
+  real repo needs a run on the Mac — the error-surfacing path was verified live instead.
+
 ### 2026-07-07j — Connected Devices UI + mobile interface revamp
 
 Two fronts, both verified with Playwright screenshots at 390x844 (touch) and 1280x800:

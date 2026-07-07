@@ -47,6 +47,7 @@ import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynam
 import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
 import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
 import { createPairingCode, claimPairingCode, verifyDeviceToken, listDevices, revokeDevice, setDeviceTier, readAudit, appendAudit as appendDeviceAudit, type RemoteDevice, type DeviceTier } from './src/CrucibleEngine/remoteDevices'
+import { listSources as listToolSources, addSource as addToolSource, removeSource as removeToolSource, rebuildIndex as rebuildSourceIndex, loadIndex as loadSourceIndex, searchIndex as searchSourceIndex, importTool as importSourceTool, type SourceCard, type FetchLike } from './src/CrucibleEngine/toolSources'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -1668,11 +1669,16 @@ app.post('/api/chat', async (req, res) => {
     }
     try {
       const s = await startBuilder(String(message), builderCallModel)
-      const view = builderSessionView(s)
+      // §3.3 — surface matching subscribed tools as a suggestion, never a redirect.
+      const suggestions = searchSourceIndex(DEVICE_BASE_DIR, String(message), 3)
+      const view = { ...builderSessionView(s), suggestions }
       send({ type: 'builder_session', session: view })
+      const suggestionNote = suggestions.length
+        ? `\n\nFound ${suggestions.length} matching tool${suggestions.length > 1 ? 's' : ''} in your subscribed sources — import one from the card, or keep building fresh.`
+        : ''
       const intro = view.currentQuestion
-        ? `${s.restatement}\n\nBefore I draft it: ${view.currentQuestion}`
-        : `${s.restatement}\n\nDraft ready — run the dry run to see it work before installing.`
+        ? `${s.restatement}\n\nBefore I draft it: ${view.currentQuestion}${suggestionNote}`
+        : `${s.restatement}\n\nDraft ready — run the dry run to see it work before installing.${suggestionNote}`
       send({ type: 'final', text: intro })
       if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
     } catch (e: any) {
@@ -4809,6 +4815,49 @@ app.get('/api/builder/:id', (req, res) => {
   const s = getBuilderSession(req.params.id)
   if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
   res.json({ session: builderSessionView(s) })
+})
+
+// ── GitHub tool sources (design spec §3) ─────────────────────────────────────
+// Subscriptions + index + search + import. The import endpoint runs the license
+// gate and the compile/smoke gate server-side — same rules as everything else.
+
+const ghFetch: FetchLike = (url, init) => fetch(url, init as any) as any
+
+app.get('/api/sources', (_req, res) => {
+  const index = loadSourceIndex(DEVICE_BASE_DIR)
+  res.json({ sources: listToolSources(DEVICE_BASE_DIR), indexBuiltAt: index.builtAt, indexedTools: index.cards.length })
+})
+
+app.post('/api/sources/add', (req, res) => {
+  try {
+    const sources = addToolSource(DEVICE_BASE_DIR, String(req.body?.owner ?? ''), req.body?.repo ? String(req.body.repo) : null)
+    res.json({ sources })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/sources/remove', (req, res) => {
+  const sources = removeToolSource(DEVICE_BASE_DIR, String(req.body?.owner ?? ''), req.body?.repo ? String(req.body.repo) : null)
+  res.json({ sources })
+})
+
+app.post('/api/sources/reindex', async (_req, res) => {
+  try {
+    const index = await rebuildSourceIndex(DEVICE_BASE_DIR, ghFetch)
+    res.json({ builtAt: index.builtAt, indexedTools: index.cards.length, errors: index.errors })
+  } catch (e: any) { res.status(500).json({ error: e.message }) }
+})
+
+app.get('/api/sources/search', (req, res) => {
+  res.json({ results: searchSourceIndex(DEVICE_BASE_DIR, String(req.query.q ?? ''), 10) })
+})
+
+app.post('/api/sources/import', async (req, res) => {
+  const card = req.body?.card as SourceCard | undefined
+  if (!card?.repo || !card?.path) { res.status(400).json({ error: 'card with repo and path required' }); return }
+  try {
+    const result = await importSourceTool(DEVICE_BASE_DIR, ghFetch, card, builderCtx(req.body?.projectPath))
+    res.json(result)
+  } catch (e: any) { res.status(500).json({ error: e.message }) }
 })
 
 // ── Tool refinement (design spec §4.2/§4.3) ──────────────────────────────────
