@@ -1346,6 +1346,36 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07l — Mobile UI bug sweep + overhaul (verified with scripted phone-viewport walkthrough)
+
+Drove the real app in a 390×844 touch browser (Playwright + stubbed pipeline SSE) through
+every surface — menu, history drawer, mode switcher, Brain PiP, composer, full pipeline
+round, code blocks, tables — with automated horizontal-overflow and 44px-tap-target audits
+on each state. Zero audit findings after the fixes; desktop at 1440px verified unregressed.
+
+- **Light-theme leak (worst bug)**: `index.css` was a leftover light/dark template with
+  `code { background: #f4f3ec }` under `color-scheme: light dark` — on any phone in light
+  mode, every code element rendered as a cream chip inside the dark app (fenced blocks
+  showed a white panel). Rewrote `index.css` as a pinned dark-only base; OS theme can no
+  longer leak in.
+- **Inline code rendered as block divs**: react-markdown v9+ removed the `inline` prop, so
+  `!props.inline` was always true and inline code got the block treatment. Block-ness is now
+  derived from the language class / newlines.
+- **Markdown tables were raw pipe text**: no GFM plugin. Added `remark-gfm` (new dep) +
+  a `table` renderer wrapping tables in `.crucible-table-wrap` — styled, horizontally
+  scrollable on desktop, cells wrap on phones so no column hides off-screen.
+- **Topbar text collision**: message text scrolled under the transparent topbar and collided
+  with the status chips. Added a frosted gradient backdrop on mobile — on a `::before`
+  pseudo-element, because `backdrop-filter` on the bar itself makes it the containing block
+  for the `position:fixed` menu sheet nested inside it (that variant broke the menu; caught
+  by the walkthrough).
+- **Tap targets ≥44px on mobile**: topbar history trigger (was 29×27), history-drawer close
+  (32×32), copy buttons (22×22, padding+negative margin so the glyph doesn't move), feedback
+  votes (21×18), Remote Brain PiP Exit (41×21), composer pills incl. Brain + expanded mode
+  options (19px tall), menu sign-in link (12px tall). Mode/Brain pills now share the
+  `.crucible-pill` class so sizing and shimmer are uniform.
+- Verify: `scratchpad walk.mjs` runs the whole flow headless; `npx tsc -b` clean.
+
 ### 2026-07-07k — GitHub tool sources: subscriptions, discovery index, builder surfacing, gated import (design-spec item 5, §3)
 
 New `src/CrucibleEngine/toolSources.ts` + server/frontend wiring — the last unstarted

@@ -3,6 +3,7 @@ import { API_BASE, apiFetch, getDeviceToken, setDeviceToken } from './api'
 import CrucibleMark from './CrucibleMark'
 import './modelData'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
@@ -87,6 +88,7 @@ function ModeSwitcher({ mode, setMode, modeMenuOpen, setModeMenuOpen }: {
           <button
             key={m.id}
             onPointerDown={e => { e.stopPropagation(); setMode(m.id); setModeMenuOpen(false); haptic('light') }}
+            className="crucible-pill"
             title={meta.hint}
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
@@ -174,7 +176,7 @@ function CopyButton({ text, inline = false, title = 'Copy' }: { text: string; in
     setTimeout(() => setCopied(false), 1500)
   }
   return (
-    <button onClick={copy} title={title} aria-label={title} style={{
+    <button onClick={copy} title={title} aria-label={title} className="crucible-copy-btn" style={{
       // Inline: sits in a flex row (code header) so it never overlaps sibling labels.
       // Default: absolute overlay pinned to the top-right of a relative container.
       ...(inline
@@ -218,6 +220,7 @@ function FeedbackButtons({ query, synthesis, promptType }: { query: string; synt
         <button
           key={v}
           onClick={() => vote(v)}
+          className="crucible-vote-btn"
           title={v === 'up' ? 'Good answer' : 'Bad answer'}
           style={{
             background: voted === v ? (v === 'up' ? 'rgba(77,184,158,0.15)' : 'rgba(248,124,124,0.12)') : 'none',
@@ -1009,6 +1012,7 @@ function HistoryBinder({ onRestore }: { onRestore: (session: HistorySession) => 
       <button
         ref={triggerRef}
         onClick={() => setOpen(o => !o)}
+        className="crucible-topbar-btn"
         title="Session history"
         style={{
           background: open ? 'rgba(124,124,248,0.1)' : 'none',
@@ -1092,6 +1096,7 @@ function HistoryBinder({ onRestore }: { onRestore: (session: HistorySession) => 
             <button
               onClick={() => setOpen(false)}
               aria-label="Close"
+              className="crucible-drawer-close"
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', color: '#666',
                 width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -3504,6 +3509,7 @@ export default function App() {
                 {/* Exit */}
                 <button
                   onClick={() => setRemoteBrain(false)}
+                  className="crucible-pip-exit"
                   style={{
                     background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,255,255,0.1)',
                     backdropFilter: 'blur(4px)',
@@ -4138,12 +4144,15 @@ export default function App() {
                   <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '10px -18px 12px' }} />
                   <div className="crucible-synthesis" style={{ fontSize: 13.5, lineHeight: 1.75, color: '#d8d8e8', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere' as const, wordBreak: 'break-word' as const, userSelect: 'text' as const }}>
                    <ReactMarkdown
+                     remarkPlugins={[remarkGfm]}
                      components={{
                        pre({ children }: any) { return <>{children}</> },
                        code({ node, className, children, ...props }: any) {
                          const match = /language-(\w+)/.exec(className || '')
-                         const isBlock = !props.inline
                          const code = String(children).replace(/\n$/, '')
+                         // react-markdown v9+ no longer passes an `inline` prop — a code
+                         // node is a block iff it has a language class or spans lines.
+                         const isBlock = !!match || code.includes('\n')
                          if (isBlock && match) {
                            return <CollapsibleCode language={match[1]} code={code} />
                          }
@@ -4168,6 +4177,15 @@ export default function App() {
                        h1({ children }: any) { return <h1 style={{ fontSize: 16, fontWeight: 700, margin: '14px 0 6px', color: '#fff' }}>{children}</h1> },
                        h2({ children }: any) { return <h2 style={{ fontSize: 14, fontWeight: 700, margin: '12px 0 5px', color: '#fff' }}>{children}</h2> },
                        h3({ children }: any) { return <h3 style={{ fontSize: 13, fontWeight: 600, margin: '10px 0 4px', color: 'rgba(255,255,255,0.8)' }}>{children}</h3> },
+                       // GFM tables: wide tables scroll inside their own container
+                       // instead of stretching the message column.
+                       table({ children }: any) {
+                         return (
+                           <div className="crucible-table-wrap">
+                             <table>{children}</table>
+                           </div>
+                         )
+                       },
                      }}
                    >{round.synthesis}</ReactMarkdown>
                    {round.synthStreaming && !round.synthesisDone && (
@@ -4763,6 +4781,7 @@ export default function App() {
             {isMobile && (
               <button
                 onClick={() => setRemoteBrain(r => !r)}
+                className="crucible-pill"
                 title="Remote Brain — control your Mac from this phone"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 4,

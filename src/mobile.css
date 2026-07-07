@@ -103,6 +103,42 @@ html, body, #root {
   cursor: default !important;
 }
 
+/* ── GFM tables in answers (all widths) ──────────────────────────────────── */
+/* Rendered via remark-gfm; wide tables scroll inside their own wrapper so the
+   message column never stretches or clips. */
+.crucible-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 10px 0;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+}
+.crucible-table-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.crucible-table-wrap th,
+.crucible-table-wrap td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+.crucible-table-wrap th {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.45);
+  background: rgba(255,255,255,0.04);
+}
+.crucible-table-wrap tr:last-child td {
+  border-bottom: none;
+}
+
 /* ── Mobile breakpoint (≤ 640px) ─────────────────────────────────────────── */
 /* Mobile is a first-class surface, not the desktop layout shrunk down:
    larger reading type, thumb-reach bottom sheets instead of top-anchored
@@ -116,6 +152,63 @@ html, body, #root {
     padding: env(safe-area-inset-top, 0px) 12px 0 12px !important;
     height: calc(48px + env(safe-area-inset-top, 0px)) !important;
     z-index: 120 !important;
+  }
+
+  /* Frosted backdrop — message text scrolls under the bar, so without a
+     background it visually collides with the status chips. Lives on a pseudo-
+     element because backdrop-filter on the bar itself would make it the
+     containing block for the position:fixed menu sheet nested inside it. */
+  .crucible-topbar::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(to bottom, rgba(10,10,15,0.92), rgba(10,10,15,0.75));
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+
+  /* Topbar icon buttons (history clock etc.): real 44px touch targets */
+  .crucible-topbar-btn {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  /* History drawer close: match */
+  .crucible-drawer-close {
+    width: 44px !important;
+    height: 44px !important;
+  }
+
+  /* Copy buttons (message / answer / code header): grow the hit area without
+     moving the glyph — padding expands around the 14px icon. */
+  .crucible-copy-btn {
+    padding: 12px !important;
+    margin: -8px !important;
+  }
+
+  /* Feedback votes */
+  .crucible-vote-btn {
+    padding: 10px 12px !important;
+    font-size: 14px !important;
+  }
+
+  /* Remote Brain PiP exit: was 41x21 — untappable */
+  .crucible-pip-exit {
+    padding: 9px 16px !important;
+    font-size: 12px !important;
+  }
+
+  /* Composer pills (mode selector, Code toggle, Brain): thumb-sized */
+  .crucible-pill,
+  .crucible-pill--select {
+    min-height: 36px !important;
+    padding: 8px 12px !important;
+    font-size: 11px !important;
+  }
+  .crucible-pill span {
+    font-size: 11px !important;
   }
 
   /* Message list: tighter horizontal padding (bottom clearance handled by paddingBottom state) */
@@ -222,6 +315,29 @@ html, body, #root {
     padding: 14px 20px !important;
     font-size: 14.5px !important;
     min-height: 48px !important;
+  }
+  /* Nested buttons too (e.g. the Google sign-in link) — never below 44px.
+     inline-flex because min-height is ignored on inline elements. */
+  .crucible-menu-panel button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: 13px;
+  }
+  /* Inline links (e.g. "sign in with Google"): pad the hit area without
+     inflating the text line. */
+  .crucible-menu-panel a {
+    display: inline-block;
+    padding: 14px 6px;
+    margin: -14px -6px;
+    font-size: 13px;
+  }
+
+  /* Tables: on a phone, wrapping cells beats hiding columns off-screen.
+     Headers stay nowrap for scanability; min-width keeps columns readable. */
+  .crucible-table-wrap td {
+    white-space: normal !important;
+    min-width: 96px;
   }
 
   /* ── Bottom sheets (Connected Devices etc.) ───────────────────────────── */
