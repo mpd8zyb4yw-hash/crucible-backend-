@@ -1346,6 +1346,40 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07f — Natural-language tool builder API with mandatory dry-run gate (design-spec item 2)
+
+`[~]` **Backend complete and verified; chat-pipeline/UI wiring not yet done** — nothing calls
+these endpoints from the frontend yet.
+
+New `src/CrucibleEngine/toolBuilder.ts` — the "build me a tool that…" conversational flow from
+design spec §2, model-agnostic (callers inject a free-tier `callModel`):
+
+- **State machine per session**: `clarifying → drafted → verified → installed` (or `failed`).
+  Draft extraction returns restatement + spec + at most 3 clarifying questions (asked one at a
+  time; free-form revisions accepted too). Any draft change invalidates a prior dry run.
+- **The install gate is structural, not cosmetic** (§6 "shipped means proven"):
+  `installBuilder()` throws unless the *current* draft has a passed dry run. Dry run = compile
+  + empty-args probe + model-generated realistic invocation, full transcript stored on the
+  session as user-facing evidence. A transcript with zero successful invocations is a fail.
+- **Honest persona handling**: `persona_agent` drafts are rejected at dry run with an
+  explanation (the registry only executes code-backed tools — no persona runtime yet), rather
+  than installing something that wouldn't run.
+- **Installed tools** land as v1 `DynamicToolRecord`s with `provenance: user_authored` and a
+  passed verification stamp — full versioning/rollback from 07e applies.
+- **Trigger capture**: `detectBuildRequest()` — deterministic, high-precision
+  ("build/create/make/write me a tool/command"), same null-on-doubt philosophy as
+  `localIntentRouter`. Exported but NOT yet wired into the chat pipeline.
+- **server.ts**: `POST /api/builder/{start,reply,dryrun,install}`, `GET /api/builder/:id`.
+
+Verified: 18-assertion tsx test with a scripted model (trigger detection precision, clarifying
+flow, install-before-dryrun refused, dryrun-while-clarifying refused, pass transcript with
+probe+sample, live registry invocation after install, persisted provenance, persona rejected
++ uninstallable, broken body fails + uninstallable) — all pass. Live server probe confirms
+routes are wired behind auth (start reaches the model selector; this dev box has no provider
+keys, so the model call itself errors as expected).
+
+Remaining for item 2: chat-pipeline trigger wiring + frontend builder UI (both form factors).
+
 ### 2026-07-07e — Dynamic tool versioning + rollback (design-spec item 1)
 
 First build item from `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md`: every dynamic tool is

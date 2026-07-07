@@ -44,6 +44,7 @@ import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleE
 import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory, readGlobalMemoryDigest, globalMemoryFile } from './src/CrucibleEngine/state/session'
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
 import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool } from './src/CrucibleEngine/tools/dynamicTools'
+import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView } from './src/CrucibleEngine/toolBuilder'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -4605,6 +4606,55 @@ app.post('/api/tools/rollback', (req, res) => {
     res.status(500).json({ error: `restored but failed to compile live: ${e.message}` }); return
   }
   res.json({ ok: true, name: record.name, version: record.version, changeNote: record.changeNote })
+})
+
+// ── Natural-language tool builder (design spec §2) ───────────────────────────
+// Flow: POST /start → { session } with draft + currentQuestion; POST /reply until no
+// questions remain; POST /dryrun to produce the verification transcript; POST /install
+// (refused server-side unless the dry run passed). GET /:id to poll state.
+
+function builderCallModel(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const { models } = selectModels('general', SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
+  const m = models[0]
+  return m ? callModel(m, messages) : Promise.reject(new Error('no model available for builder'))
+}
+
+function builderCtx(projectPath?: string): import('./src/CrucibleEngine/tools/protocol').ToolCtx {
+  return { projectPath: projectPath || process.cwd(), allowMutation: false } as import('./src/CrucibleEngine/tools/protocol').ToolCtx
+}
+
+app.post('/api/builder/start', async (req, res) => {
+  try {
+    const s = await startBuilder(String(req.body?.message ?? ''), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/reply', async (req, res) => {
+  try {
+    const s = await replyBuilder(String(req.body?.id ?? ''), String(req.body?.answer ?? ''), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/dryrun', async (req, res) => {
+  try {
+    const s = await dryRunBuilder(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/install', (req, res) => {
+  try {
+    const s = installBuilder(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath))
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.get('/api/builder/:id', (req, res) => {
+  const s = getBuilderSession(req.params.id)
+  if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
+  res.json({ session: builderSessionView(s) })
 })
 
 // POST /api/agent/graduate — approve global graduation for a dynamic tool (I6)
