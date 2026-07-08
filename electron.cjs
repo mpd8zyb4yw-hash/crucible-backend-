@@ -1,7 +1,17 @@
 const { app, BrowserWindow, desktopCapturer, session } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const http = require('http');
 const path = require('path');
+
+// ── Auto-sync pipeline ───────────────────────────────────────────────────────
+// Poll the dev branch and hard-sync this checkout to it, so pushed commits go live
+// on this machine with no manual `git pull` + restart. The backend runs under
+// `tsx watch` (see spawnBackend), so a synced server.ts change auto-restarts the
+// server; Vite HMR + a window reload pick up frontend changes.
+const SYNC_BRANCH = process.env.CRUCIBLE_SYNC_BRANCH || 'claude/remote-brain-capture-latency-yeas6j';
+const SYNC_INTERVAL_MS = 15000;
+const SYNC_ENABLED = process.env.CRUCIBLE_AUTOSYNC !== '0';
+let syncing = false;
 
 // ── Dedicated data location — do NOT share with other crucible builds ────────
 // Default userData would be ~/Library/Application Support/crucible, which every
@@ -34,7 +44,10 @@ function spawnBackend() {
 
   const env = { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + (process.env.PATH || ''), FORCE_COLOR: '0' };
 
-  serverProc = spawn('/opt/homebrew/bin/npx', ['tsx', 'server.ts'], {
+  // `tsx watch` restarts the server automatically whenever server.ts (or anything it
+  // imports) changes on disk — which is how a git auto-sync pull goes live with no
+  // manual restart.
+  serverProc = spawn('/opt/homebrew/bin/npx', ['tsx', 'watch', 'server.ts'], {
     cwd,
     shell: false,
     env,
@@ -51,6 +64,58 @@ function spawnBackend() {
   viteProc.stdout.on('data', d => console.log('[vite]', d.toString().trim()));
   viteProc.stdout.on('error', () => {});
   viteProc.stderr.on('data', d => console.error('[vite:err]', d.toString().trim()));
+}
+
+// Run a git command in the repo dir; resolves { code, out } (never rejects).
+function git(args) {
+  return new Promise((resolve) => {
+    execFile('/usr/bin/git', args, {
+      cwd: __dirname,
+      env: { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin' },
+    }, (err, stdout) => resolve({ code: err ? (err.code || 1) : 0, out: (stdout || '').trim() }));
+  });
+}
+
+// One auto-sync tick: fetch the branch, and if the remote is ahead, hard-reset this
+// checkout to it. `tsx watch` restarts the server on the resulting file changes; we
+// reload the windows so the frontend + capture page pick up any changes too.
+async function autoSyncTick() {
+  if (syncing) return;
+  syncing = true;
+  try {
+    const fetched = await git(['fetch', 'origin', SYNC_BRANCH, '--quiet']);
+    if (fetched.code !== 0) return;
+    const local = (await git(['rev-parse', 'HEAD'])).out;
+    const remote = (await git(['rev-parse', `origin/${SYNC_BRANCH}`])).out;
+    if (!local || !remote || local === remote) return;
+    console.log(`[autosync] ${local.slice(0, 7)} → ${remote.slice(0, 7)} — syncing branch ${SYNC_BRANCH}`);
+    const reset = await git(['reset', '--hard', `origin/${SYNC_BRANCH}`]);
+    if (reset.code !== 0) { console.error('[autosync] reset failed:', reset.out); return; }
+    console.log('[autosync] synced; tsx watch will restart the server');
+    // Give tsx watch a moment to restart the backend, then refresh the windows so any
+    // frontend/capture-page changes go live too.
+    setTimeout(() => {
+      if (mainWindow) mainWindow.webContents.reloadIgnoringCache();
+      if (captureWindow) captureWindow.webContents.reloadIgnoringCache();
+    }, 2500);
+  } finally {
+    syncing = false;
+  }
+}
+
+async function startAutoSync() {
+  if (!SYNC_ENABLED) { console.log('[autosync] disabled (CRUCIBLE_AUTOSYNC=0)'); return; }
+  // Make sure we're actually on the sync branch before tracking it.
+  const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).out;
+  if (branch !== SYNC_BRANCH) {
+    console.log(`[autosync] switching ${branch} → ${SYNC_BRANCH}`);
+    await git(['fetch', 'origin', SYNC_BRANCH, '--quiet']);
+    const co = await git(['checkout', SYNC_BRANCH]);
+    if (co.code !== 0) await git(['checkout', '-B', SYNC_BRANCH, `origin/${SYNC_BRANCH}`]);
+  }
+  console.log(`[autosync] watching origin/${SYNC_BRANCH} every ${SYNC_INTERVAL_MS / 1000}s`);
+  setInterval(autoSyncTick, SYNC_INTERVAL_MS);
+  autoSyncTick();
 }
 
 function createWindow() {
@@ -129,6 +194,7 @@ if (!gotTheLock) {
       console.log('[electron] launching window');
       createWindow();
       createCaptureWindow();
+      startAutoSync();   // begin polling the branch for pushed commits
     } catch (err) {
       console.error('[electron] startup failed:', err.message);
       app.quit();

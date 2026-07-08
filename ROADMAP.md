@@ -1454,6 +1454,26 @@ Recording permission granted the relay now gets real 15-20fps ingest instead of 
 fallback. Also fixes the diag endpoint's own 401. Frame size also cut to 1024px/q0.4-0.45
 to reduce per-frame transfer latency.
 
+### 2026-07-08f — Auto-sync pipeline: pushed commits go live on the Mac automatically
+
+Every server fix in this saga only took effect after a manual `git pull` + restart on the
+Mac, which was silently skipped for several rounds (the running server predated the fix).
+Closed that gap with a real sync pipeline:
+
+- **`electron.cjs`** — backend now runs under **`tsx watch`** (auto-restarts on any synced
+  file change). A `startAutoSync()` poller `git fetch`es the dev branch every 15s and, when
+  the remote is ahead, `git reset --hard`s this checkout to it, then reloads the windows.
+  Server changes go live via the watch restart; frontend/capture-page changes via the reload.
+  Opt out with `CRUCIBLE_AUTOSYNC=0`; branch override via `CRUCIBLE_SYNC_BRANCH`.
+- **`autosync.sh`** — standalone equivalent for running the server without Electron (the
+  direct `tsx watch server.ts` dev path). `./autosync.sh` syncs + supervises in the foreground.
+
+Caveats: (1) hard-reset discards uncommitted local edits on the branch — intended for a
+pull-only client. (2) Changes to `electron.cjs` itself need a full app relaunch (the Electron
+main process doesn't hot-reload; only renderer windows + the `tsx watch` server do). (3) This
+pipeline itself ships in `electron.cjs`, so it requires ONE manual pull to install, after
+which it self-sustains.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
