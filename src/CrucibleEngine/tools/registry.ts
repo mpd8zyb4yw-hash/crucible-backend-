@@ -6,11 +6,12 @@ import path from 'path'
 import { spawn, execFile } from 'child_process'
 import type { ToolCall, ToolCtx, ToolDef, ToolResult } from './protocol'
 import { createCheckpoint } from '../checkpoint'
-import { compileTool, saveDynamicTool, listDynamicTools, recordToolSuccess, type DynamicToolRecord } from './dynamicTools'
+import { compileTool, saveDynamicTool, listDynamicTools, recordToolSuccess, detectTuningSuggestion, updateDynamicTool, rollbackDynamicTool, listToolVersions, loadDynamicTool, toolVersion, type DynamicToolRecord } from './dynamicTools'
 import { appendGlobalMemory } from '../state/session'
 import { buildGraphDigest, findEntities, upsertEntity, touchEntities } from '../entityGraph'
 import { gFetch, googleServicesStatus } from './googleApis'
 import { getUITree, clickElement, typeText } from '../macTools'
+import { tierPermitsTool, appendAudit } from '../remoteDevices'
 
 const tools = new Map<string, ToolDef>()
 
@@ -41,11 +42,33 @@ export const registry = {
     if (def.mutates && ctx.allowMutation === false) {
       return { ok: false, output: `Tool ${call.name} mutates state and is not permitted in this context.` }
     }
+    // Remote Brain tier gate (design spec §5.2) — every denied and executed call is audited.
+    if (ctx.deviceTier && !tierPermitsTool(ctx.deviceTier, call.name)) {
+      const result = { ok: false, output: `Tool ${call.name} is not permitted at remote tier '${ctx.deviceTier}'. The desktop owner can raise this device's tier in Connected Devices.` }
+      if (ctx.deviceId) appendAudit(ctx.projectPath, { deviceId: ctx.deviceId, action: 'tool', detail: `${call.name} DENIED (tier ${ctx.deviceTier})`, ok: false })
+      ctx.emit?.({ type: 'tool_result', id: call.id, tool: call.name, ok: false, output: result.output })
+      return result
+    }
     if (ctx.signal?.aborted) return { ok: false, output: 'Cancelled.' }
     checkpointBeforeMutation(call.name, ctx)
     ctx.emit?.({ type: 'tool_call', id: call.id, tool: call.name, args: call.args })
     try {
       const result = await def.run(call.args, ctx)
+      if (ctx.deviceTier && ctx.deviceId) {
+        appendAudit(ctx.projectPath, { deviceId: ctx.deviceId, action: 'tool', detail: `${call.name} ${JSON.stringify(call.args).slice(0, 200)}`, ok: result.ok })
+      }
+      // §4.1 — tag successful dynamic-tool invocations with the request domain.
+      // recordToolSuccess no-ops for built-in tools (no on-disk record). When the
+      // usage pattern crosses the tuning threshold, surface a one-time suggestion.
+      if (result.ok) {
+        try {
+          const updated = recordToolSuccess(ctx.projectPath, call.name, ctx.domainTag)
+          if (updated) {
+            const suggestion = detectTuningSuggestion(updated)
+            if (suggestion) ctx.emit?.({ type: 'tool_tuning_suggestion', ...suggestion })
+          }
+        } catch { /* usage tracking must never break a tool call */ }
+      }
       ctx.emit?.({ type: 'tool_result', id: call.id, tool: call.name, ok: result.ok, output: result.output.slice(0, 2000), truncated: result.truncated ?? false })
       return result
     } catch (e: any) {
@@ -754,6 +777,10 @@ registry.register({
       successCount: 0,
       lastUsed: null,
       tier: 'session',
+      version: 1,
+      changeNote: 'initial version',
+      provenance: { source: 'agent', importedFrom: null },
+      verification: { lastSmokeTest: Date.now(), result: 'pass' },
     }
     try {
       saveDynamicTool(ctx.projectPath, record)
@@ -764,6 +791,92 @@ registry.register({
 
     ctx.emit?.({ type: 'tool_created', name, description })
     return { ok: true, output: `Tool '${name}' created and registered. It is now available in this session and all future sessions. Use it like any other tool.` }
+  },
+})
+
+registry.register({
+  name: 'update_tool',
+  description: [
+    'Update an existing dynamic tool (description, params schema, and/or body).',
+    'The outgoing version is archived and the change is applied as a new version,',
+    'so any update can be undone with rollback_tool. A changed body is compiled and',
+    'smoke-tested before it replaces the old one — a failing body leaves the tool untouched.',
+    'Only works on tools created with create_tool, not built-ins.',
+  ].join(' '),
+  params: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Name of the dynamic tool to update.' },
+      description: { type: 'string', description: 'New description (optional).' },
+      params: { type: 'object', description: 'New JSON Schema for args (optional).' },
+      body: { type: 'string', description: 'New async JS function body (optional).' },
+      change_note: { type: 'string', description: 'One line: what changed and why.' },
+    },
+    required: ['name', 'change_note'],
+  },
+  mutates: false,
+  async run(args, ctx) {
+    const name = String(args.name ?? '').trim()
+    const current = loadDynamicTool(ctx.projectPath, name)
+    if (!current) return { ok: false, output: `No dynamic tool named '${name}'. Only tools created with create_tool can be updated.` }
+
+    const changes: Partial<Pick<DynamicToolRecord, 'description' | 'params' | 'body'>> = {}
+    if (typeof args.description === 'string' && args.description.trim()) changes.description = args.description.trim()
+    if (typeof args.params === 'object' && args.params !== null) changes.params = args.params as Record<string, unknown>
+    if (typeof args.body === 'string' && args.body.trim()) changes.body = args.body.trim()
+    if (!Object.keys(changes).length) return { ok: false, output: 'Nothing to change — provide description, params, and/or body.' }
+
+    // Compile + smoke-test the effective body before committing anything
+    const effectiveBody = changes.body ?? current.body
+    let runFn: (a: Record<string, unknown>, c: ToolCtx) => Promise<import('./protocol').ToolResult>
+    try {
+      runFn = compileTool(effectiveBody)
+      await runFn({}, ctx)
+    } catch (e: any) {
+      return { ok: false, output: `New body failed verification, tool left unchanged: ${e.message}` }
+    }
+
+    const next = updateDynamicTool(ctx.projectPath, name, changes, String(args.change_note ?? '').trim(), true)
+    if (!next) return { ok: false, output: `Failed to persist update for '${name}'.` }
+    registry.register({ name, description: next.description, params: next.params, mutates: false, run: runFn })
+    return { ok: true, output: `Tool '${name}' updated to v${toolVersion(next)} (previous v${toolVersion(current)} archived — rollback_tool restores it).` }
+  },
+})
+
+registry.register({
+  name: 'rollback_tool',
+  description: [
+    'Restore a previous version of a dynamic tool. Defaults to the version just before',
+    'the current one; pass `version` to restore a specific one. The restore is itself a',
+    'new version, so nothing is ever lost — a rollback can be rolled back.',
+  ].join(' '),
+  params: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Name of the dynamic tool to roll back.' },
+      version: { type: 'number', description: 'Version number to restore (optional, default: previous).' },
+    },
+    required: ['name'],
+  },
+  mutates: false,
+  async run(args, ctx) {
+    const name = String(args.name ?? '').trim()
+    const versions = listToolVersions(ctx.projectPath, name)
+    if (!versions.length) return { ok: false, output: `No dynamic tool named '${name}'.` }
+    const target = args.version != null ? Number(args.version) : undefined
+    const next = rollbackDynamicTool(ctx.projectPath, name, target)
+    if (!next) {
+      const available = versions.map(v => `v${v.version}${v.current ? ' (current)' : ''}`).join(', ')
+      return { ok: false, output: `Cannot roll back '${name}'${target != null ? ` to v${target}` : ''}. Available: ${available}` }
+    }
+    // Re-register the restored body live (it passed its gate when it was originally installed)
+    try {
+      const runFn = compileTool(next.body)
+      registry.register({ name, description: next.description, params: next.params, mutates: false, run: runFn })
+    } catch (e: any) {
+      return { ok: false, output: `Restored record failed to compile (persisted, but not live): ${e.message}` }
+    }
+    return { ok: true, output: `Tool '${name}' rolled back: now v${toolVersion(next)} (${next.changeNote}).` }
   },
 })
 
@@ -791,7 +904,7 @@ registry.register({
     const tools = listDynamicTools(ctx.projectPath)
     if (!tools.length) return { ok: true, output: 'No dynamic tools created yet for this project.' }
     const lines = tools.map(t =>
-      `- ${t.name} (used ${t.useCount}x): ${t.description}`
+      `- ${t.name} v${toolVersion(t)} (used ${t.useCount}x): ${t.description}`
     )
     return { ok: true, output: `Dynamic tools (${tools.length}):\n${lines.join('\n')}` }
   },

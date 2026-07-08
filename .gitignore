@@ -3,7 +3,9 @@ dist/
 build/
 release/
 server-dist/
-app/
+# app/ is the built frontend bundle served to phones from :3001. It is NOT built at
+# deploy time, so it must be committed for frontend changes to reach devices. Rebuild
+# with `npx vite build` after any src/*.tsx/*.css change, then commit app/.
 .env.local
 .env*.local
 .circuit-state.json

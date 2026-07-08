@@ -26,9 +26,17 @@
 >    it must keep the original rendered layout (fenced code stays a code block, prose stays
 >    prose) and change only the content — see `applyFixedCode()` in `src/App.tsx`.
 > 4. **Run commands:** backend `nohup npx tsx server.ts > /tmp/crucible-server.log 2>&1 < /dev/null & disown`
->    (port 3001; plain `&` gets reaped between turns). Frontend: vite via `.claude/launch.json`
->    config `crucible-vite` (~port 5180). Never `npm run build`. Engine code under
+>    (port 3001; plain `&` gets reaped between turns). Frontend dev: vite via
+>    `.claude/launch.json` config `crucible-vite` (~port 5180). Engine code under
 >    `src/CrucibleEngine/` runs via `tsx`, not typechecked by the app tsconfig.
+>    **Shipping a frontend change — do NOT skip this:** phones and any browser hitting
+>    `:3001` load the STATIC bundle in `app/` (gitignored, built locally), NOT the vite dev
+>    server. A source edit to `src/*.tsx`/`*.css` is invisible on `:3001` until you rebuild:
+>    run **`npx vite build`** (regenerates `app/`) and restart the server. The old
+>    "never `npm run build`" rule meant only *don't run the `tsc -b` gate in the npm build
+>    script* (it breaks on the app tsconfig) — it did NOT mean "never build the frontend,"
+>    and taking it literally means every UI change silently never reaches the phone. Verify
+>    UI work against `:3001` (the real device path), not just `:5180`.
 >
 > Checkbox legend: `[x]` done & verified in code · `[~]` partial (note what's missing) · `[ ]` not built.
 
@@ -1345,6 +1353,389 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 ---
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
+
+### 2026-07-07p — FOUND the actual model download + fixed its interruption behavior
+
+"find it" — traced the model-download the user experiences. There is NO bespoke downloader
+in the repo (the local LLM is the OS-resident Apple FM daemon, `sizeBytes: 0`; Track A's
+downloadable ONNX models — SmolLM2/Gemma per `contracts.ts` `family`/`sizeBytes`/`installed`
+— were designed but never landed: `localModels/registry.ts` is still the placeholder, no
+`onnxAdapter.ts`). The ONE thing that actually downloads model weights is
+**`@xenova/transformers` fetching `Xenova/all-MiniLM-L6-v2` (quantized ONNX, ~23MB) from
+HuggingFace** in `masterpiece/corpus/embed.ts:loadPipeline()` — the corpus embedder.
+
+Two real defects there, both matching the report ("resets to 0 / breaks on connection loss"):
+1. **No persistence** — transformers.js cached under `node_modules/.cache` (wiped on
+   reinstall) with no explicit persistent dir, so a completed download could vanish.
+   Fix: `env.cacheDir = .crucible/models-cache` (override `CRUCIBLE_MODEL_CACHE`), so a
+   finished download survives restarts and is never re-fetched.
+2. **Permanent latch-off** — ANY failure (a dropped connection mid-download) set
+   `_onnxAvailable = false` for the whole process AND never cleared `_pipelineLoading`, so
+   one interrupted download silently degraded EVERY later embedding to the weak 256-dim hash
+   fallback until a full server restart. Fix: no permanent disable — record the failure time,
+   clear the in-flight promise, and retry after a 30s cooldown, so a transient blip
+   self-heals (reusing any completed cache). `isOnnxAvailable()`/`embeddingDim()` now key off
+   the actually-loaded pipeline so the reported dim always matches what `embed()` produces.
+- Verified: fallback path exercised in-sandbox (ONNX import fails on unbuilt `sharp`) — dim
+  256, vectors self-consistent, post-failure calls fast (cooldown honored), no permanent
+  latch. Typecheck clean. `env.cacheDir` confirmed a real API in the installed
+  transformers.js.
+
+Not done (bigger, egress-dependent): true mid-file BYTE resume of the HF fetch would mean
+wiring `modelDownloader.ts` (07o) into transformers.js's exact cache layout to pre-fetch the
+weights resumably. The above makes a *completed* download persistent and makes interruptions
+self-healing instead of permanently degrading; mid-file resume of that specific fetch is the
+remaining piece and needs a machine with egress to build+test against the real HF CDN.
+
+### 2026-07-07o — Multi-context command fix + persistent resumable downloads
+
+Two user-reported bugs.
+
+**1. "0 contextual understanding" on multi-step commands** — e.g. "open youtube search for
+be.busta play one of the videos" returned a canned "playing one of the videos on youtube."
+Cause: `localIntentRouter.resolvePlayMedia` greedily matched `play` and captured the
+referential phrase "one of the videos" as the literal search query, firing a deterministic
+1-step plan for a 3-step task. Fix: `resolvePlayMedia` now BAILS to the real agent loop (which
+has `search_youtube` + `open_app` and plans with step-to-step context) when (a) another action
+verb precedes "play" (compound command) or (b) the play-subject is referential ("one of the
+videos", "the first one", "it"). High-precision single-intent commands ("play X on youtube",
+"put on some jazz", "play despacito") still resolve locally. Verified: 12-assertion test —
+7 multi-context phrasings bail, 5 single-intent still resolve.
+
+**2. Model download resets to 0 on app close / connection loss** — there was no server-side
+download code at all (the local model runs via an external daemon), so any download's progress
+lived in ephemeral client state and reset. Built `src/CrucibleEngine/modelDownloader.ts` — a
+server-owned resumable manager, same principle as the chat task registry (server work survives
+client disconnect):
+- Bytes stream to `<dest>.part`; the file on disk IS the progress. A `<dest>.part.json` sidecar
+  records url/total/etag.
+- Resume issues `Range: bytes=<have>-` and appends — never restarts from 0. Servers that ignore
+  Range (200 not 206) are detected and the partial truncated safely.
+- Dropped connections retry with exponential backoff, each retry resuming from the current
+  offset. Completion validates size, promotes `.part`→`dest`, cleans the sidecar.
+- `getProgress()` reads straight from disk, so closing/reopening the app re-attaches to live
+  server-side progress instead of resetting.
+- Endpoints: `POST /api/downloads/{start,pause,cancel}`, `GET /api/downloads`,
+  `GET /api/downloads/progress`.
+- Verified: 13-assertion test with a Range-aware local server — interrupt at 700KB/2MB →
+  progress survives a simulated restart (paused, correct offset) → resume continues from the
+  offset (not 0) → byte-identical SHA-256 → artifacts cleaned; plus a repeated-drop convergence
+  case. Live server probe: start→complete→listed end-to-end.
+
+Both fixes are backend-only (server runs via tsx), so no `app/` rebuild was needed. The
+frontend model-download UI (wherever it lives — likely the native app) should call these
+endpoints and poll `GET /api/downloads/progress` instead of holding progress in local state.
+
+### 2026-07-07n — SHIP THE BUNDLE: commit built `app/` so frontend changes reach the phone
+
+The user reported (twice) that no UI changes appeared on their iPhone, with horizontal
+scrolling and a left pane overlapping the chat bar / agent tabs. Diagnosis: those bugs are
+from the OLD build — the current source at 390px has **zero** horizontal overflow and no
+overlap (verified with a Playwright element-bounds sweep: `docScrollW === vw === 390`, empty
+offender list, in both plain-chat and agent/builder states). The changes weren't reaching the
+device because **`app/` was gitignored and never committed**, and there is no deploy-time
+build step — the server just serves whatever `app/` exists on disk. The `sw.js` service
+worker is push-only (no asset caching), so it wasn't the cause.
+
+Fix: removed `app/` from `.gitignore` and committed the freshly-built bundle. Because
+`vite build` emits new content-hashed filenames each build, the directory (not just
+individual files) must stay un-ignored so every rebuild ships. **Going forward: after any
+`src/*.tsx`/`*.css` change, run `npx vite build` and commit `app/` in the same PR** — a source
+edit alone is invisible on device. This is now also called out in the header run-commands rule.
+
+### 2026-07-07m — §4.1 usage-pattern tuning suggestions + CRITICAL frontend-build fix
+
+**Process fix first (this is why the user "saw no changes"):** every frontend change since 07e
+was committed as *source* but the `app/` static bundle that phones and `:3001` actually load
+was never rebuilt — I'd been verifying against the vite dev server (`:5180`) only. Ran
+`npx vite build`, confirmed all five systems' UI is now baked into `app/assets/*` and renders
+on the real `:3001` phone path (screenshot: Connected Devices sheet, pairing, builder chat
+capture all present). Clarified the misleading "never npm run build" ROADMAP rule so this
+can't recur. **`app/` is gitignored — a deploy that only `git pull`s must run `vite build`.**
+
+**§4.1 — adaptive refinement's usage-pattern detection (completes design-spec item 3):**
+- `recordToolSuccess(projectPath, name, domain?)` — was previously DEAD CODE (defined, never
+  called, so `successCount`/graduation never actually incremented). Now called from
+  `registry.exec` on every successful tool run, tagging dynamic-tool invocations with the
+  request's classified domain (`domainCounts` on the record). No-ops for built-in tools.
+- `ctx.domainTag` threaded from `/api/chat` (via `classifyDomain(message)`) through
+  runAgentLoop/runPlannedTask into `registry.exec` — all four agent execution paths.
+- `detectTuningSuggestion(record)` — pure: fires when a tool has ≥5 tagged uses AND ≥60%
+  concentration in one non-`general` domain not already suggested. `markDomainSuggested`
+  suppresses repeats; a NEW dominant domain can still surface later.
+- `registry.exec` emits a `tool_tuning_suggestion` SSE event when the threshold is crossed;
+  `GET /api/tools/suggestions` + `POST /api/tools/suggestions/dismiss` for polling.
+- Frontend `TuningBanner`: "You've used X mostly for {domain} — tune it?" → "tune it" opens a
+  real refine session (07h diff + before/after smoke gate; nothing auto-applies), "dismiss"
+  suppresses that domain. Suggestion, never a redirect (§4.1).
+- Verified: 11-assertion tsx test (tagging, threshold, even-spread rejection, general
+  excluded, dismiss suppression, new-domain resurfacing, built-in no-op, registry.exec SSE
+  emission) all pass; frontend + new-code typecheck clean.
+
+This closes every buildable item in the design spec. Remaining gaps are all
+environment-bound: model-backed E2E of builder/refiner/tuning (needs provider keys), a real
+GitHub crawl (needs egress), iOS keyboard behavior, and the persona runtime (§2.2, unbuilt).
+
+### 2026-07-07l — Mobile UI bug sweep + overhaul (verified with scripted phone-viewport walkthrough)
+
+Drove the real app in a 390×844 touch browser (Playwright + stubbed pipeline SSE) through
+every surface — menu, history drawer, mode switcher, Brain PiP, composer, full pipeline
+round, code blocks, tables — with automated horizontal-overflow and 44px-tap-target audits
+on each state. Zero audit findings after the fixes; desktop at 1440px verified unregressed.
+
+- **Light-theme leak (worst bug)**: `index.css` was a leftover light/dark template with
+  `code { background: #f4f3ec }` under `color-scheme: light dark` — on any phone in light
+  mode, every code element rendered as a cream chip inside the dark app (fenced blocks
+  showed a white panel). Rewrote `index.css` as a pinned dark-only base; OS theme can no
+  longer leak in.
+- **Inline code rendered as block divs**: react-markdown v9+ removed the `inline` prop, so
+  `!props.inline` was always true and inline code got the block treatment. Block-ness is now
+  derived from the language class / newlines.
+- **Markdown tables were raw pipe text**: no GFM plugin. Added `remark-gfm` (new dep) +
+  a `table` renderer wrapping tables in `.crucible-table-wrap` — styled, horizontally
+  scrollable on desktop, cells wrap on phones so no column hides off-screen.
+- **Topbar text collision**: message text scrolled under the transparent topbar and collided
+  with the status chips. Added a frosted gradient backdrop on mobile — on a `::before`
+  pseudo-element, because `backdrop-filter` on the bar itself makes it the containing block
+  for the `position:fixed` menu sheet nested inside it (that variant broke the menu; caught
+  by the walkthrough).
+- **Tap targets ≥44px on mobile**: topbar history trigger (was 29×27), history-drawer close
+  (32×32), copy buttons (22×22, padding+negative margin so the glyph doesn't move), feedback
+  votes (21×18), Remote Brain PiP Exit (41×21), composer pills incl. Brain + expanded mode
+  options (19px tall), menu sign-in link (12px tall). Mode/Brain pills now share the
+  `.crucible-pill` class so sizing and shimmer are uniform.
+- Verify: `scratchpad walk.mjs` runs the whole flow headless; `npx tsc -b` clean.
+
+### 2026-07-07k — GitHub tool sources: subscriptions, discovery index, builder surfacing, gated import (design-spec item 5, §3)
+
+New `src/CrucibleEngine/toolSources.ts` + server/frontend wiring — the last unstarted
+system from the design spec:
+
+- **Subscriptions (§3.1)**: `.crucible/tool-sources.json`, owner or owner/repo, validated +
+  normalized. `POST /api/sources/{add,remove}`, `GET /api/sources`.
+- **Index (§3.1/§3.2)**: `POST /api/sources/reindex` crawls subscriptions via the GitHub API
+  (unauthenticated free tier, or `GITHUB_TOKEN` when set) — repo tree → heuristic manifest
+  detection over folder conventions (`skills/`, `tools/`, `agents/`, `commands/`,
+  `.claude/skills/`), one card per tool with kind (code vs skill_md), SPDX license, branch.
+  **Unreachable repos are reported in `errors[]`, never silently indexed as 0 tools, and a
+  total outage never wipes a previously good index** (added after the live probe showed a
+  rate-limited crawl reporting "0 tools" as if it had succeeded).
+- **Search (§3.1 live mode)**: `GET /api/sources/search?q=` — stopworded ("tool" matches
+  every card path), stem-matched ("grills" → grill-me), scored.
+- **Builder surfacing (§3.3)**: the chat builder capture attaches the top 3 index matches to
+  the `builder_session` event; `BuilderCard` renders them as green suggestion rows with an
+  import button — a suggestion, never a redirect; the build flow continues regardless.
+- **Import (§3.4), gated like everything else**: license gate (no license → warn hard,
+  copyleft → warn, explicit disallow → block) → fetch source → the same compile+smoke gate.
+  skill_md tools are rejected honestly (no persona runtime yet); code that doesn't meet the
+  (args, ctx) → {ok, output} contract fails the gate with guidance to adapt via the builder.
+  Installed imports are v1 records with `provenance: imported` pointing at repo@branch:path
+  — versioning/rollback applies from birth.
+- Also this session: governance panel now uses the mobile sheet pattern (`crucible-sheet`).
+- Verified: 17-assertion tsx test with a fake GitHub (detection incl. `.claude/skills`,
+  noise rejection, license capture, search precision, all three import-rejection paths,
+  successful import running live in the registry, provenance format, duplicate rejection).
+  Frontend typecheck clean. Live endpoint probes worked end-to-end; the real crawl itself
+  is blocked in this dev sandbox (session proxy 403 / shared-IP rate limit), so crawling a
+  real repo needs a run on the Mac — the error-surfacing path was verified live instead.
+
+### 2026-07-07j — Connected Devices UI + mobile interface revamp
+
+Two fronts, both verified with Playwright screenshots at 390x844 (touch) and 1280x800:
+
+**Connected Devices (completes 07i's usable surface):**
+- `src/api.ts`: device credential stored locally, sent as `x-crucible-device` on every
+  `apiFetch`; `getDeviceToken`/`setDeviceToken`.
+- `DevicesPanel` (App.tsx, menu → Connected Devices): desktop mints the 6-digit code (big
+  tabular display, "valid 5 min, single use"), any surface claims with the code, tier chips
+  (observe/build/full) desktop-managed, revoke from either side, collapsible audit log.
+  Centered modal on desktop, bottom sheet on mobile.
+- **Verified through the real UI**: a scripted two-context Playwright run paired a phone
+  context against a desktop-minted code, phone showed "This device is paired", desktop
+  raised the tier to build (chip state confirmed on screenshot), phone self-revoked.
+
+**Mobile revamp (mobile is a first-class surface, not the desktop layout shrunk):**
+- Hamburger dropdown → full-width bottom sheet with grab handle, scrim, 48px rows, safe-area
+  padding (`.crucible-menu-panel/-scrim` in mobile.css; desktop dropdown unchanged). Required
+  raising `.crucible-topbar` z-index above the input bar on mobile — the sheet lives inside
+  the topbar's stacking context and was painting under the composer (caught on screenshot,
+  fixed, re-verified).
+- Reading type scale: synthesis 15px/1.7 (`.crucible-synthesis` hook), user bubble 15px,
+  proper mobile heading sizes. Desktop keeps its denser 13.5px.
+- Send button 26px → 38px thumb target; composer 22px radius; model cards strip slimmed to a
+  compact status readout; sheet pattern (`.crucible-sheet`) shared by all future panels.
+- Bug found by the screenshot pass and fixed: a lone SSE `final` (builder/refine error
+  paths) fabricated an empty "agent finished" panel via the agent reducer — now a `final`
+  with no preceding agent events just sets the answer text (re-verified: panel gone).
+- Frontend typecheck clean throughout.
+
+Remaining mobile polish candidates: history drawer + governance panel to the sheet pattern,
+keyboard-open composer behavior on real iOS (visualViewport path exists but untested here).
+
+### 2026-07-07i — Remote Brain: device pairing, permission tiers, audit log, kill switch (design-spec item 4, §5.2)
+
+New `src/CrucibleEngine/remoteDevices.ts` + server wiring. Backend complete and E2E-verified
+over live HTTP (this subsystem needs no models, so the whole flow was actually driven):
+
+- **Pairing**: desktop (OAuth cookie only — a paired device cannot mint codes) POSTs
+  `/api/pair/start` → 6-digit code, 5-minute TTL, single-use. Phone POSTs `/api/pair/claim`
+  (the code is the auth) → long-lived credential returned exactly once; only its sha256 is
+  stored (`.crucible/remote-devices.json`). New devices always start at `observe` — more
+  access is an explicit desktop action, never part of pairing.
+- **Tiers (§5.2), enforced twice**: HTTP layer (observe = read-only GET whitelist; build/full
+  pass) and tool layer — `ToolCtx.deviceTier` flows through `/api/chat` into all four agent
+  execution paths (local intent, FM plan, planned task, agent loop) and `registry.exec`
+  denies per-tier: observe = no tools, build = no `run`/UI-control/deletes/moves
+  (`BUILD_TIER_DENIED_TOOLS`), full = all tools but destructive shell stays behind the
+  existing `allowDestructive` gate for EVERY tier (spec: "even inside Tier 3").
+- **Tier changes** are desktop-cookie-only (`POST /api/devices/:id/tier`); a device asking to
+  raise itself gets 403 (verified live).
+- **Kill switch**: `POST /api/devices/:id/revoke` from the desktop or from the device itself;
+  tokens are re-verified per request so revocation is immediate (verified: next request 401).
+- **Audit (§5.2)**: append-only `.crucible/remote-audit.jsonl` — pairing, tier changes, every
+  device HTTP call, every tool call (allowed AND denied) with ok flag. `GET /api/devices/audit`
+  from either surface; exportable (it's a file).
+- Verified: 24-assertion tsx test (single-use codes, hash-only storage, tier semantics,
+  registry.exec denial + audit entries, invalid-tier rejection, immediate revocation,
+  no-hash-leak in listings) all pass, plus a 10-step live HTTP E2E: mint → claim → observe
+  GET ok / POST chat 403 / self-tier-raise 403 → desktop raises to build → chat passes →
+  self-revoke → token dead → audit shows the full story including the DENIED lines.
+- Still open from §5.2: biometric step-up for full tier (needs the mobile client),
+  interactive confirm-taps for destructive ops (allowDestructive is currently a hard block
+  from remote, not a prompt), desktop "remote session active" indicator, and pairing/devices
+  UI (frontend). §5.3 relay hardening unchanged.
+
+### 2026-07-07h — Adaptive tool refinement: NL edits with diff + mandatory before/after smoke test (design-spec item 3, §4.2/§4.3)
+
+New `src/CrucibleEngine/toolRefiner.ts` — "make reverse_text also uppercase the output":
+
+- **Diff, never overwrite (§4.2)**: `startRefine()` has the model apply the smallest change
+  to the current spec and returns field-level diffs (description/params/body, old vs new). A
+  proposal with zero diffs is rejected outright. Proposals pin `fromVersion`; if the tool
+  changes underneath (agent edit, another session), smoke/apply fail with an explicit version
+  conflict instead of clobbering.
+- **Mandatory before/after gate (§4.3)**: `smokeRefine()` runs OLD and NEW bodies on the same
+  scenarios (empty-args probe + model-generated realistic args) and stores the before/after
+  transcript. `applyRefine()` throws without a passed smoke test — same structural gate as
+  the builder's install. Apply goes through `updateDynamicTool()` (07e), so it's a new
+  version with the prior one archived; instant rollback via rollback_tool.
+- **Chat capture**: `detectRefineRequest()` — refine verb + the name of an *existing* dynamic
+  tool (underscores or spaces); no known tool named → null, message flows to the pipeline
+  untouched. Wired into `/api/chat` after the builder capture, emitting `refine_session` SSE.
+- **Endpoints**: `POST /api/refine/{start,smoke,apply}`, `GET /api/refine/:id`.
+- **Frontend `RefineCard`** (App.tsx): red/green field diffs (monospace, overflowX-scrollable),
+  smoke-test button, before/after transcript per scenario, apply button that only exists in
+  the DOM once the server reports `verified`, "applied as vN — previous version archived"
+  confirmation. Status header says "proposed - not yet verified" until evidence exists.
+- Verified: 16-assertion tsx test (detection precision incl. spaced names, diff generation,
+  apply-before-smoke refused, before/after transcript `elbicurc`→`ELBICURC`, versioned apply
+  with live re-registration, stale-version conflict, no-change rejection, broken proposal
+  fails smoke + uninstallable, unknown tool) — all pass. Frontend typecheck clean. Live
+  server probes: refine endpoints wired behind auth; chat capture verified end-to-end with a
+  seeded dynamic tool (reached the refiner branch; model call errors on this keyless box,
+  as expected).
+- **§4.1 (usage-pattern suggestions) is NOT built** — needs per-invocation context tagging
+  that doesn't exist yet. That plus a model-backed E2E in a keyed environment are the
+  remaining item-3 gaps.
+
+### 2026-07-07g — Tool builder wired into chat + frontend builder card (item 2 complete on the happy path)
+
+Completes the wiring left open in 07f — the builder is now reachable end-to-end from chat:
+
+- **server.ts `/api/chat`**: new early-return before the agent branch — `detectBuildRequest()`
+  (deterministic, null-on-doubt) routes "build me a tool that…" to `startBuilder()`, emits a
+  `builder_session` SSE event with the full session view plus a `final` text (restatement +
+  first clarifying question), then closes the stream. Opt-out via `builderMode: false`.
+- **src/App.tsx**: `Round.builder` + `BuilderView` interface; SSE handler for
+  `builder_session` (with a builder-round `final` intercept so agent state is never
+  fabricated for builder rounds); new `BuilderCard` component rendered per round — status
+  header (clarifying / draft ready **not yet verified** / dry run passed / installed /
+  failed), restatement, draft summary with trigger aliases, one-at-a-time question input,
+  dry-run transcript (per-step args + ok/fail + output, monospace, overflowX-scrollable),
+  and an install button that only exists in the DOM when the server reports `verified`
+  (server refuses anyway — double gate). No emojis; wordBreak everywhere; flexWrap
+  layouts sized for narrow and wide (inputs `flex: 1 1 160px; minWidth: 0`).
+- Verified: frontend `tsc -p tsconfig.app.json --noEmit` clean; live `/api/chat` POST with
+  a build phrase confirmed the branch fires (SSE `final` + `[DONE]`, pipeline untouched) —
+  this box has no provider keys, so the model call inside errors as expected; the
+  model-backed portion of the flow is covered by 07f's 18-assertion scripted test whose
+  session shape matches `BuilderView` field-for-field.
+- Still open before calling item 2 fully `[x]`: one real model-backed end-to-end run in a
+  keyed environment (chat → card → clarify → dry run → install), and a visual pass on
+  phone + desktop widths.
+
+### 2026-07-07f — Natural-language tool builder API with mandatory dry-run gate (design-spec item 2)
+
+`[~]` **Backend complete and verified; chat-pipeline/UI wiring not yet done** — nothing calls
+these endpoints from the frontend yet.
+
+New `src/CrucibleEngine/toolBuilder.ts` — the "build me a tool that…" conversational flow from
+design spec §2, model-agnostic (callers inject a free-tier `callModel`):
+
+- **State machine per session**: `clarifying → drafted → verified → installed` (or `failed`).
+  Draft extraction returns restatement + spec + at most 3 clarifying questions (asked one at a
+  time; free-form revisions accepted too). Any draft change invalidates a prior dry run.
+- **The install gate is structural, not cosmetic** (§6 "shipped means proven"):
+  `installBuilder()` throws unless the *current* draft has a passed dry run. Dry run = compile
+  + empty-args probe + model-generated realistic invocation, full transcript stored on the
+  session as user-facing evidence. A transcript with zero successful invocations is a fail.
+- **Honest persona handling**: `persona_agent` drafts are rejected at dry run with an
+  explanation (the registry only executes code-backed tools — no persona runtime yet), rather
+  than installing something that wouldn't run.
+- **Installed tools** land as v1 `DynamicToolRecord`s with `provenance: user_authored` and a
+  passed verification stamp — full versioning/rollback from 07e applies.
+- **Trigger capture**: `detectBuildRequest()` — deterministic, high-precision
+  ("build/create/make/write me a tool/command"), same null-on-doubt philosophy as
+  `localIntentRouter`. Exported but NOT yet wired into the chat pipeline.
+- **server.ts**: `POST /api/builder/{start,reply,dryrun,install}`, `GET /api/builder/:id`.
+
+Verified: 18-assertion tsx test with a scripted model (trigger detection precision, clarifying
+flow, install-before-dryrun refused, dryrun-while-clarifying refused, pass transcript with
+probe+sample, live registry invocation after install, persisted provenance, persona rejected
++ uninstallable, broken body fails + uninstallable) — all pass. Live server probe confirms
+routes are wired behind auth (start reaches the model selector; this dev box has no provider
+keys, so the model call itself errors as expected).
+
+Remaining for item 2: chat-pipeline trigger wiring + frontend builder UI (both form factors).
+
+### 2026-07-07e — Dynamic tool versioning + rollback (design-spec item 1)
+
+First build item from `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md`: every dynamic tool is
+now versioned with one-call rollback, making tool changes reversible (design principle 4).
+
+- **`dynamicTools.ts`** — `DynamicToolRecord` gains `version`, `changeNote`, `provenance`,
+  `verification` (all optional; legacy records read as v1). New: `updateDynamicTool()` archives
+  the outgoing record to `.crucible/dynamic-tools/history/<name>/v<N>.json` and bumps the
+  version; `rollbackDynamicTool()` restores any archived version *as a new version* (history is
+  append-only — a rollback can itself be rolled back, nothing is ever destroyed); usage-counter
+  writes (`recordToolSuccess`) deliberately never bump the version. `listToolVersions()` /
+  `loadToolVersion()` for inspection.
+- **`registry.ts`** — new agent tools `update_tool` (compiles + smoke-tests the new body
+  *before* committing; a failing body leaves the tool untouched) and `rollback_tool`.
+  `create_tool` now stamps v1 with provenance + a passed verification record.
+  `list_dynamic_tools` shows versions.
+- **`server.ts`** — `GET /api/debug/dynamic-tools/:name/versions` and
+  `POST /api/tools/rollback` (restores + re-registers live in the running registry).
+- **Verified, not assumed:** 14-assertion tsx smoke test (create → invoke → update → invoke →
+  broken-update rejected → rollback → invoke shows old output → rollback-the-rollback →
+  counter writes don't bump), all passing; plus live HTTP verification of both endpoints
+  against a running server (versions listing, rollback v2→v3-restoring-v1, auth wall intact).
+  `tsc -p tsconfig.server.json` shows no new errors in changed regions (pre-existing errors
+  unchanged — server runs via tsx).
+
+Next per the build order: user-facing builder dialogue with mandatory pre-install dry run.
+
+### 2026-07-07d — Design spec + gap analysis: Tool Builder, GitHub import, Refinement, Remote Brain
+
+Added `docs/DESIGN_SPEC_TOOL_BUILDER_REMOTE_BRAIN.md` — the full design spec for four
+systems (natural-language tool/agent builder, GitHub tool subscriptions/import, adaptive
+tool refinement, Remote Brain mobile command center) plus a code-verified gap analysis
+mapping each spec piece to what actually exists (`tools/registry.ts`, `tools/dynamicTools.ts`,
+`sandbox.ts`, `macTools.ts`, `agent/localIntentRouter.ts`, server.ts Step 9). Key findings:
+registry + dynamic tools + Remote Brain eyes/hands/stream exist; the user-facing builder
+dialogue, ToolSpec versioning/rollback, refinement smoke-test gate, device pairing/tiers,
+and all of GitHub import are not built. Doc ends with a recommended build order. No code
+changes this session.
 
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 

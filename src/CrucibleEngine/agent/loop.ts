@@ -44,6 +44,11 @@ export interface AgentLoopOpts {
   verify?: (finalText: string, ctx: ToolCtx) => Promise<VerifyResult>
   systemPreamble?: string
   allowMutation?: boolean
+  /** Remote Brain tier + device id when this request came from a paired device (§5.2). */
+  deviceTier?: 'observe' | 'build' | 'full'
+  deviceId?: string
+  /** Inferred domain of the request, tags dynamic-tool usage for §4.1 suggestions. */
+  domainTag?: string
   /** Resume from a saved checkpoint — used instead of the default [system, user] start. */
   initialMessages?: Array<Record<string, unknown>>
   /** Called after every iteration with current messages — for checkpoint persistence. */
@@ -106,7 +111,7 @@ MAC CONTROL: You can run any shell command via the run tool. To open apps: open 
 
 GLOBAL MEMORY: Use write_global_memory to save durable facts about the USER that should persist across ALL future sessions — preferences, timezone, recurring tools, communication style. Call it whenever you learn something genuinely reusable, not just task-specific. Examples: "User prefers concise responses", "User works in TypeScript", "User is based in Italy". Project-specific facts go in the per-project memory automatically; global memory is only for things true across all projects.
 
-TOOL ACQUISITION: If you need to do something that no existing tool supports, use create_tool to write a new one on the spot. The tool body is a JS async function (receives args, ctx) that returns { ok: boolean, output: string }. It is registered immediately and persisted so future sessions have it too. Only create a tool when the built-in set genuinely cannot do the job — don't duplicate existing tools.
+TOOL ACQUISITION: If you need to do something that no existing tool supports, use create_tool to write a new one on the spot. The tool body is a JS async function (receives args, ctx) that returns { ok: boolean, output: string }. It is registered immediately and persisted so future sessions have it too. Only create a tool when the built-in set genuinely cannot do the job — don't duplicate existing tools. To change an existing dynamic tool use update_tool (the old version is archived automatically); rollback_tool restores a prior version if an update made things worse.
 
 EXECUTION OVER SCRIPTING: When the user asks you to delete, move, download, organize, or manipulate files — USE YOUR TOOLS to do it directly. NEVER output a Python script, shell script, or code block for the user to run themselves. NEVER use rm -rf in the run tool — it is blocked. Instead use: delete_file for single files, delete_folder for folders/directories, empty_trash to empty the Trash, move_file to move or rename, download_file to fetch images. Outputting a script instead of acting is a failure.
 
@@ -136,6 +141,9 @@ export async function runAgentLoop(opts: AgentLoopOpts): Promise<AgentLoopResult
     emit,
     signal,
     allowMutation: opts.allowMutation ?? true,
+    deviceTier: opts.deviceTier,
+    deviceId: opts.deviceId,
+    domainTag: opts.domainTag,
     budget: { remainingTokens: budgetTokens },
     onFileMutated: opts.onFileMutated,
   }

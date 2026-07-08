@@ -43,7 +43,12 @@ import { approveGlobalGraduation } from './src/CrucibleEngine/tools/dynamicTools
 import { saveTokens, googleServicesStatus, GOOGLE_SCOPES } from './src/CrucibleEngine/tools/googleApis'
 import { latestResumable, saveSession, newSessionId, readMemoryDigest, appendMemory, readGlobalMemoryDigest, globalMemoryFile } from './src/CrucibleEngine/state/session'
 import { buildCodebaseContext, indexStats, ensureIndex, reindexFiles, searchIndex } from './src/CrucibleEngine/state/codebaseIndex'
-import { loadDynamicToolsInto, dynamicToolStats } from './src/CrucibleEngine/tools/dynamicTools'
+import { loadDynamicToolsInto, dynamicToolStats, listToolVersions, rollbackDynamicTool, compileTool as compileDynamicTool, allTuningSuggestions, markDomainSuggested } from './src/CrucibleEngine/tools/dynamicTools'
+import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSession, sessionView as builderSessionView, detectBuildRequest } from './src/CrucibleEngine/toolBuilder'
+import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
+import { createPairingCode, claimPairingCode, verifyDeviceToken, listDevices, revokeDevice, setDeviceTier, readAudit, appendAudit as appendDeviceAudit, type RemoteDevice, type DeviceTier } from './src/CrucibleEngine/remoteDevices'
+import { listSources as listToolSources, addSource as addToolSource, removeSource as removeToolSource, rebuildIndex as rebuildSourceIndex, loadIndex as loadSourceIndex, searchIndex as searchSourceIndex, importTool as importSourceTool, type SourceCard, type FetchLike } from './src/CrucibleEngine/toolSources'
+import { startDownload, getProgress as getDownloadProgress, listDownloads as listDownloadsManager, pauseDownload, cancelDownload } from './src/CrucibleEngine/modelDownloader'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -149,7 +154,7 @@ import { lookupUncertainty, recordCalibrationForQuery, getSurface } from './src/
 import { checkAmbientContext } from './src/CrucibleEngine/ambientWatcher'
 import { submitRequest, approveRequest, rejectRequest, getPendingRequests, getAllRequests } from './src/CrucibleEngine/governanceQueue'
 import { runApprovedProvisioningRequests, getProvisioningLog } from './src/CrucibleEngine/autonomousProvisioner'
-import { getDomainContext, ingestIntoDomainStore, getDomainStoreIndex } from './src/CrucibleEngine/domainRouter'
+import { getDomainContext, ingestIntoDomainStore, getDomainStoreIndex, classifyDomain } from './src/CrucibleEngine/domainRouter'
 import { buildAdaptationContext } from './src/CrucibleEngine/behavioralAdaptation'
 import { getLongHorizonContext, extendHorizonPlan, getHorizonPlan } from './src/CrucibleEngine/longHorizonPlanner'
 import { buildCausalDigest, enrichAndRecord } from './src/CrucibleEngine/causalMemory'
@@ -475,11 +480,45 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   next()
 }
 
-// Auth guard — all /api/* except /api/auth/*, /api/screen-stream, and /api/diag
+// ── Remote Brain device auth (design spec §5.2) ──────────────────────────────
+// Paired devices authenticate with a long-lived token (x-crucible-device header or
+// crucible_device cookie) instead of the OAuth cookie. Tier is enforced here at the
+// HTTP layer (observe = read-only) and again per-tool in registry.exec.
+
+const DEVICE_BASE_DIR = process.cwd()
+
+function getRemoteDevice(req: express.Request): RemoteDevice | null {
+  const token = (req.headers['x-crucible-device'] as string) || parseCookies(req.headers.cookie ?? '')['crucible_device'] || ''
+  if (!token) return null
+  return verifyDeviceToken(DEVICE_BASE_DIR, token)
+}
+
+// Paths an 'observe'-tier device may reach (read-only surface).
+function observeTierAllowed(req: express.Request): boolean {
+  if (req.method !== 'GET') return false
+  return req.path === '/remote-brain/status' || req.path === '/diag'
+    || req.path.startsWith('/debug/') || req.path.startsWith('/devices')
+    || req.path === '/history' || req.path.startsWith('/task/')
+}
+
+// Auth guard — all /api/* except /api/auth/*, /api/screen-stream, /api/diag, and
+// /api/pair/claim (the pairing code IS the auth for that one call).
 app.use('/api', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (req.path.startsWith('/auth/')) return next()
   if (req.path === '/screen-stream') return next()   // no cookie on phone; LAN-only stream
   if (req.path === '/diag') return next()            // diagnostic endpoint — no auth needed
+  if (req.path === '/pair/claim') return next()      // claimed with a short-lived pairing code
+
+  const device = getRemoteDevice(req)
+  if (device) {
+    if (device.tier === 'observe' && !observeTierAllowed(req)) {
+      appendDeviceAudit(DEVICE_BASE_DIR, { deviceId: device.id, action: 'http', detail: `${req.method} ${req.path} DENIED (tier observe)`, ok: false })
+      return res.status(403).json({ error: `This device is paired at tier 'observe' (read-only). The desktop owner can raise its tier in Connected Devices.` })
+    }
+    ;(req as any).remoteDevice = device
+    appendDeviceAudit(DEVICE_BASE_DIR, { deviceId: device.id, action: 'http', detail: `${req.method} ${req.path}`, ok: true })
+    return next()
+  }
   return requireAuth(req, res, next)
 })
 
@@ -1615,6 +1654,71 @@ app.post('/api/chat', async (req, res) => {
   }
   console.log('[/api/chat] Received:', message?.slice(0, 80), '| mode:', mode, '| device:', device)
 
+  // ── Tool builder capture (design spec §2.1 step 1) ──────────────────────────
+  // "build me a tool that…" opens a builder session instead of the pipeline. The
+  // detector is deterministic and high-precision (null-on-doubt), so normal chat
+  // never lands here by accident. The frontend drives the rest of the flow
+  // (clarify → dry run → install) through /api/builder/*.
+  if (req.body.builderMode !== false && detectBuildRequest(message ?? '')) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    const send = (payload: object) => {
+      const line = `data: ${JSON.stringify(payload)}\n\n`
+      res.write(line)
+      if (chatSessionId) broadcastEvent(chatSessionId, line, res)
+    }
+    try {
+      const s = await startBuilder(String(message), builderCallModel)
+      // §3.3 — surface matching subscribed tools as a suggestion, never a redirect.
+      const suggestions = searchSourceIndex(DEVICE_BASE_DIR, String(message), 3)
+      const view = { ...builderSessionView(s), suggestions }
+      send({ type: 'builder_session', session: view })
+      const suggestionNote = suggestions.length
+        ? `\n\nFound ${suggestions.length} matching tool${suggestions.length > 1 ? 's' : ''} in your subscribed sources — import one from the card, or keep building fresh.`
+        : ''
+      const intro = view.currentQuestion
+        ? `${s.restatement}\n\nBefore I draft it: ${view.currentQuestion}${suggestionNote}`
+        : `${s.restatement}\n\nDraft ready — run the dry run to see it work before installing.${suggestionNote}`
+      send({ type: 'final', text: intro })
+      if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
+    } catch (e: any) {
+      send({ type: 'final', text: `Could not start the tool builder: ${e?.message ?? e}` })
+    }
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
+
+  // ── Tool refinement capture (design spec §4.2) ──────────────────────────────
+  // "make <existing dynamic tool> less chatty" opens a refine session: proposed
+  // diff, never a silent overwrite. Only fires when the message names a dynamic
+  // tool that actually exists for this project.
+  const refineProjectPath = req.body.projectPath ? path.resolve(req.body.projectPath) : process.cwd()
+  const refineHit = req.body.builderMode !== false ? detectRefineRequest(message ?? '', refineProjectPath) : null
+  if (refineHit) {
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    const send = (payload: object) => {
+      const line = `data: ${JSON.stringify(payload)}\n\n`
+      res.write(line)
+      if (chatSessionId) broadcastEvent(chatSessionId, line, res)
+    }
+    try {
+      const s = await startRefine(refineHit.toolName, refineHit.instruction, refineProjectPath, builderCallModel)
+      send({ type: 'refine_session', session: s })
+      const intro = `Proposed change to ${s.toolName} (v${s.fromVersion}): ${s.explanation}\n\nReview the diff, then run the smoke test to see before/after output. Nothing is applied until the smoke test passes and you approve.`
+      send({ type: 'final', text: intro })
+      if (chatSessionId && chatRoundId) patchActiveSessionRound(chatUser, chatRoundId, { synthesis: intro, synthesisDone: true, synthStreaming: false })
+    } catch (e: any) {
+      send({ type: 'final', text: `Could not start the refinement: ${e?.message ?? e}` })
+    }
+    res.write('data: [DONE]\n\n')
+    res.end()
+    return
+  }
+
   // ── Agent mode — sustained tool loop instead of the synthesis pipeline ─────
   if (mode === 'agent' || mode === 'seeker' || (mode === 'code' && detectAgentTask(message ?? '')) || (req.body.agentMode !== false && detectAgentTask(message ?? '') && !isCreativeProse(message ?? ''))) {
     res.setHeader('Content-Type', 'text/event-stream')
@@ -1630,6 +1734,14 @@ app.post('/api/chat', async (req, res) => {
       ? path.resolve(req.body.projectPath)
       : newDesktopProjectPath()
     fs.mkdirSync(projectPath, { recursive: true })
+
+    // Remote Brain tier (§5.2): requests from a paired device carry its tier into
+    // every ToolCtx so registry.exec can enforce per-tool limits and audit calls.
+    const remoteDev = (req as any).remoteDevice as RemoteDevice | undefined
+    const deviceTier = remoteDev?.tier
+    const deviceId = remoteDev?.id
+    // §4.1 — classify the request domain once; tags dynamic-tool usage for tuning suggestions.
+    const domainTag = classifyDomain(message ?? '').domain
 
     const ac = new AbortController()
     // res 'close' fires on client disconnect; req 'close' fires once the body is
@@ -1707,7 +1819,7 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'agent_start', driver: 'on-device (no LLM)', projectPath, resumed: false })
         const toolCtx: ToolCtx = {
           projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-          allowMutation: true, allowDestructive: false, onFileMutated,
+          allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId, domainTag,
         }
         try {
           const { ok, summary } = await runLocalPlan(localPlan, (call) => registry.exec(call, toolCtx))
@@ -1739,7 +1851,7 @@ app.post('/api/chat', async (req, res) => {
           send({ type: 'agent_start', driver: 'on-device FM (Layer 2)', projectPath, resumed: false })
           const toolCtx: ToolCtx = {
             projectPath, userId: chatUser?.id, emit: send, signal: ac.signal,
-            allowMutation: true, allowDestructive: false, onFileMutated,
+            allowMutation: true, allowDestructive: false, onFileMutated, deviceTier, deviceId, domainTag,
           }
           const { ok, summary } = await runFmPlan(fmPlan, (call) => registry.exec(call, toolCtx))
           send({ type: 'final', text: summary })
@@ -1778,6 +1890,7 @@ app.post('/api/chat', async (req, res) => {
           ? { stepIndex: iterCheckpoint.stepIndex, messages: iterCheckpoint.messages }
           : undefined,
         onFileMutated,
+        deviceTier, deviceId, domainTag,
       })
       // Clean up on success
       if (result.ok) {
@@ -1812,6 +1925,7 @@ app.post('/api/chat', async (req, res) => {
         ] : undefined),
         systemPreamble: `${defaultSystemPreamble(projectPath)}\n\nDEVICE CONTEXT: This request came from a ${device === 'mobile' ? 'mobile phone' : 'desktop'}. When the user asks to open apps, files, or URLs — always execute the action on the Mac desktop, never on the user's phone. If the request is ambiguous, assume they want it on the Mac.\n\nUSER LOCATION: Timezone is Europe/Rome. Use this to infer the user region for location-dependent queries like weather. Never ask for location unless the query is too specific for timezone inference.${detectExternalExecIntent(message ?? '') ? '\n\nEXECUTION INTENT DETECTED: The user wants you to perform an action on an external system (open a URL, play media, launch an app). Do NOT return a link or describe how to do it. Do NOT construct YouTube URLs from memory — video IDs from training data are dead links. For YouTube: call search_youtube with a specific query, pick the best result URL from the live results, then call open_app with that URL. For other media/apps: use web_search to find the URL, then open_app. Execute — do not instruct.' : ''}\n\n${[globalMemory, episodeContext, graphDigest, decisionCtx, memoryDigest, codebaseContext].filter(Boolean).join('\n\n')}`,
         onFileMutated,
+        deviceTier, deviceId, domainTag,
         // Inject a fast text-only model call for model-assisted context compression
         compressCallModel: (msgs) => {
           const { models: compModels } = selectModels('general', SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
@@ -4420,6 +4534,56 @@ app.get('/api/screen-stream', (req, res) => {
   captureFrame()
 })
 
+// ── Remote Brain pairing & device management (design spec §5.2) ──────────────
+
+// POST /api/pair/start — desktop mints a 6-digit code (5 min, single-use).
+// Cookie-authenticated humans only: a paired device must not mint codes for other devices.
+app.post('/api/pair/start', (req, res) => {
+  if ((req as any).remoteDevice) { res.status(403).json({ error: 'Pairing codes can only be created from the desktop session.' }); return }
+  res.json(createPairingCode())
+})
+
+// POST /api/pair/claim — phone exchanges the code for its device credential.
+// The token in this response is shown exactly once and stored only as a hash.
+app.post('/api/pair/claim', (req, res) => {
+  const { code, name } = req.body ?? {}
+  const claimed = claimPairingCode(DEVICE_BASE_DIR, String(code ?? ''), String(name ?? ''))
+  if (!claimed) { res.status(400).json({ error: 'Invalid or expired pairing code.' }); return }
+  res.json(claimed)
+})
+
+// GET /api/devices — list paired devices (no token hashes). Visible from either surface.
+app.get('/api/devices', (_req, res) => {
+  res.json({ devices: listDevices(DEVICE_BASE_DIR) })
+})
+
+// POST /api/devices/:id/tier — tier changes are a desktop-owner action, never a device's.
+app.post('/api/devices/:id/tier', (req, res) => {
+  if ((req as any).remoteDevice) { res.status(403).json({ error: 'Tier changes require the desktop session.' }); return }
+  const tier = String(req.body?.tier ?? '') as DeviceTier
+  const ok = setDeviceTier(DEVICE_BASE_DIR, req.params.id, tier)
+  if (!ok) { res.status(400).json({ error: 'Unknown device or invalid tier (observe | build | full).' }); return }
+  res.json({ ok: true, id: req.params.id, tier })
+})
+
+// POST /api/devices/:id/revoke — the kill switch (§5.2): allowed from the desktop
+// session OR from the device itself, immediate on the next request.
+app.post('/api/devices/:id/revoke', (req, res) => {
+  const device = (req as any).remoteDevice as RemoteDevice | undefined
+  if (device && device.id !== req.params.id) {
+    res.status(403).json({ error: 'A device can only revoke itself; other devices are managed from the desktop.' }); return
+  }
+  const ok = revokeDevice(DEVICE_BASE_DIR, req.params.id)
+  if (!ok) { res.status(404).json({ error: 'Unknown or already-revoked device.' }); return }
+  res.json({ ok: true, id: req.params.id })
+})
+
+// GET /api/devices/audit — the remote audit log, viewable from either device (§5.2).
+app.get('/api/devices/audit', (req, res) => {
+  const n = Math.min(1000, Math.max(1, Number(req.query.n ?? 200)))
+  res.json({ entries: readAudit(DEVICE_BASE_DIR, n) })
+})
+
 // GET /api/remote-brain/status — check if Remote Brain tools are available
 app.get('/api/remote-brain/status', requireAuth, (req, res) => {
   exec('osascript -e "tell application \\"System Events\\" to return name of first process whose frontmost is true"',
@@ -4581,6 +4745,208 @@ app.get('/api/classifier/stats', (_req, res) => {
 app.get('/api/debug/dynamic-tools', (req, res) => {
   const projectPath = (req.query.project as string) || process.cwd()
   res.json(dynamicToolStats(projectPath))
+})
+
+// GET /api/debug/dynamic-tools/:name/versions — full version history for one tool
+app.get('/api/debug/dynamic-tools/:name/versions', (req, res) => {
+  const projectPath = (req.query.project as string) || process.cwd()
+  const versions = listToolVersions(projectPath, req.params.name)
+  if (!versions.length) { res.status(404).json({ error: `no dynamic tool named '${req.params.name}'` }); return }
+  res.json({ name: req.params.name, versions })
+})
+
+// POST /api/tools/rollback — one-click restore of a prior tool version
+app.post('/api/tools/rollback', (req, res) => {
+  const { name, version, projectPath } = req.body ?? {}
+  if (!name) { res.status(400).json({ error: 'name required' }); return }
+  const record = rollbackDynamicTool(projectPath || process.cwd(), String(name), version != null ? Number(version) : undefined)
+  if (!record) { res.status(400).json({ error: `cannot roll back '${name}'${version != null ? ` to v${version}` : ''}` }); return }
+  // Make the restored version live in the running registry
+  try {
+    const run = compileDynamicTool(record.body)
+    registry.register({ name: record.name, description: record.description, params: record.params, mutates: false, run })
+  } catch (e: any) {
+    res.status(500).json({ error: `restored but failed to compile live: ${e.message}` }); return
+  }
+  res.json({ ok: true, name: record.name, version: record.version, changeNote: record.changeNote })
+})
+
+// ── Natural-language tool builder (design spec §2) ───────────────────────────
+// Flow: POST /start → { session } with draft + currentQuestion; POST /reply until no
+// questions remain; POST /dryrun to produce the verification transcript; POST /install
+// (refused server-side unless the dry run passed). GET /:id to poll state.
+
+function builderCallModel(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const { models } = selectModels('general', SIMPLE_PIPELINE_CONFIG, 'simple', 'quorum')
+  const m = models[0]
+  return m ? callModel(m, messages) : Promise.reject(new Error('no model available for builder'))
+}
+
+function builderCtx(projectPath?: string): import('./src/CrucibleEngine/tools/protocol').ToolCtx {
+  return { projectPath: projectPath || process.cwd(), allowMutation: false } as import('./src/CrucibleEngine/tools/protocol').ToolCtx
+}
+
+app.post('/api/builder/start', async (req, res) => {
+  try {
+    const s = await startBuilder(String(req.body?.message ?? ''), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/reply', async (req, res) => {
+  try {
+    const s = await replyBuilder(String(req.body?.id ?? ''), String(req.body?.answer ?? ''), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/dryrun', async (req, res) => {
+  try {
+    const s = await dryRunBuilder(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath), builderCallModel)
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/builder/install', (req, res) => {
+  try {
+    const s = installBuilder(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath))
+    res.json({ session: builderSessionView(s) })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.get('/api/builder/:id', (req, res) => {
+  const s = getBuilderSession(req.params.id)
+  if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
+  res.json({ session: builderSessionView(s) })
+})
+
+// ── Persistent resumable downloads (model artifacts etc.) ────────────────────
+// Server-owned, so progress survives the app closing or the connection dropping —
+// the client polls GET and re-attaches to live state instead of restarting from 0.
+
+app.post('/api/downloads/start', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  const existing = getDownloadProgress(String(url), String(dest))
+  if (existing?.status === 'complete') { res.json(existing); return }
+  // Fire-and-forget: the transfer runs server-side; the client polls for progress.
+  startDownload(String(url), String(dest), { baseDir: DEVICE_BASE_DIR }).catch(() => {})
+  res.json(getDownloadProgress(String(url), String(dest)) ?? { url, dest, status: 'downloading', downloaded: 0, total: null })
+})
+
+app.get('/api/downloads', (_req, res) => {
+  res.json({ downloads: listDownloadsManager(DEVICE_BASE_DIR) })
+})
+
+app.get('/api/downloads/progress', (req, res) => {
+  const { url, dest } = req.query
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  const p = getDownloadProgress(String(url), String(dest))
+  if (!p) { res.status(404).json({ error: 'no such download' }); return }
+  res.json(p)
+})
+
+app.post('/api/downloads/pause', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  res.json({ paused: pauseDownload(String(url), String(dest)), progress: getDownloadProgress(String(url), String(dest)) })
+})
+
+app.post('/api/downloads/cancel', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  cancelDownload(String(url), String(dest))
+  res.json({ ok: true })
+})
+
+// ── Tool tuning suggestions (design spec §4.1) ───────────────────────────────
+// Poll for tools that have clustered in one domain. Surfacing a suggestion marks
+// its domain so it won't nag again; declining is just not acting on it.
+
+app.get('/api/tools/suggestions', (req, res) => {
+  const projectPath = (req.query.project as string) || process.cwd()
+  res.json({ suggestions: allTuningSuggestions(projectPath) })
+})
+
+app.post('/api/tools/suggestions/dismiss', (req, res) => {
+  const { name, domain, projectPath } = req.body ?? {}
+  if (!name || !domain) { res.status(400).json({ error: 'name and domain required' }); return }
+  markDomainSuggested(projectPath || process.cwd(), String(name), String(domain))
+  res.json({ ok: true })
+})
+
+// ── GitHub tool sources (design spec §3) ─────────────────────────────────────
+// Subscriptions + index + search + import. The import endpoint runs the license
+// gate and the compile/smoke gate server-side — same rules as everything else.
+
+const ghFetch: FetchLike = (url, init) => fetch(url, init as any) as any
+
+app.get('/api/sources', (_req, res) => {
+  const index = loadSourceIndex(DEVICE_BASE_DIR)
+  res.json({ sources: listToolSources(DEVICE_BASE_DIR), indexBuiltAt: index.builtAt, indexedTools: index.cards.length })
+})
+
+app.post('/api/sources/add', (req, res) => {
+  try {
+    const sources = addToolSource(DEVICE_BASE_DIR, String(req.body?.owner ?? ''), req.body?.repo ? String(req.body.repo) : null)
+    res.json({ sources })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/sources/remove', (req, res) => {
+  const sources = removeToolSource(DEVICE_BASE_DIR, String(req.body?.owner ?? ''), req.body?.repo ? String(req.body.repo) : null)
+  res.json({ sources })
+})
+
+app.post('/api/sources/reindex', async (_req, res) => {
+  try {
+    const index = await rebuildSourceIndex(DEVICE_BASE_DIR, ghFetch)
+    res.json({ builtAt: index.builtAt, indexedTools: index.cards.length, errors: index.errors })
+  } catch (e: any) { res.status(500).json({ error: e.message }) }
+})
+
+app.get('/api/sources/search', (req, res) => {
+  res.json({ results: searchSourceIndex(DEVICE_BASE_DIR, String(req.query.q ?? ''), 10) })
+})
+
+app.post('/api/sources/import', async (req, res) => {
+  const card = req.body?.card as SourceCard | undefined
+  if (!card?.repo || !card?.path) { res.status(400).json({ error: 'card with repo and path required' }); return }
+  try {
+    const result = await importSourceTool(DEVICE_BASE_DIR, ghFetch, card, builderCtx(req.body?.projectPath))
+    res.json(result)
+  } catch (e: any) { res.status(500).json({ error: e.message }) }
+})
+
+// ── Tool refinement (design spec §4.2/§4.3) ──────────────────────────────────
+// start → { session } with field diffs; smoke → before/after transcript; apply
+// (refused server-side unless the smoke test passed) → new version, rollbackable.
+
+app.post('/api/refine/start', async (req, res) => {
+  try {
+    const s = await startRefine(String(req.body?.toolName ?? ''), String(req.body?.instruction ?? ''), req.body?.projectPath || process.cwd(), builderCallModel)
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/refine/smoke', async (req, res) => {
+  try {
+    const s = await smokeRefine(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath), builderCallModel)
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.post('/api/refine/apply', (req, res) => {
+  try {
+    const s = applyRefine(String(req.body?.id ?? ''), builderCtx(req.body?.projectPath))
+    res.json({ session: s })
+  } catch (e: any) { res.status(400).json({ error: e.message }) }
+})
+
+app.get('/api/refine/:id', (req, res) => {
+  const s = getRefineSession(req.params.id)
+  if (!s) { res.status(404).json({ error: 'no such refine session' }); return }
+  res.json({ session: s })
 })
 
 // POST /api/agent/graduate — approve global graduation for a dynamic tool (I6)

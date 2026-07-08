@@ -68,6 +68,11 @@ html, body, #root {
   animation: pillShimmer 2.8s ease-in-out infinite alternate;
 }
 
+@keyframes sheetUp {
+  from { transform: translateY(24%); opacity: 0.4; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+
 @keyframes spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
@@ -98,42 +103,154 @@ html, body, #root {
   cursor: default !important;
 }
 
+/* ── GFM tables in answers (all widths) ──────────────────────────────────── */
+/* Rendered via remark-gfm; wide tables scroll inside their own wrapper so the
+   message column never stretches or clips. */
+.crucible-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 10px 0;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+}
+.crucible-table-wrap table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.crucible-table-wrap th,
+.crucible-table-wrap td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+.crucible-table-wrap th {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.45);
+  background: rgba(255,255,255,0.04);
+}
+.crucible-table-wrap tr:last-child td {
+  border-bottom: none;
+}
+
 /* ── Mobile breakpoint (≤ 640px) ─────────────────────────────────────────── */
+/* Mobile is a first-class surface, not the desktop layout shrunk down:
+   larger reading type, thumb-reach bottom sheets instead of top-anchored
+   dropdowns, 44px+ tap targets, compact pipeline chrome. Desktop untouched. */
 @media (max-width: 640px) {
 
-  /* Top bar: remove Electron left-pad, add status-bar safe area */
+  /* Top bar: remove Electron left-pad, add status-bar safe area.
+     z-index above the input bar (10) so the menu bottom sheet — which lives
+     inside the topbar's stacking context — paints over the composer. */
   .crucible-topbar {
     padding: env(safe-area-inset-top, 0px) 12px 0 12px !important;
-    height: calc(44px + env(safe-area-inset-top, 0px)) !important;
+    height: calc(48px + env(safe-area-inset-top, 0px)) !important;
+    z-index: 120 !important;
+  }
+
+  /* Frosted backdrop — message text scrolls under the bar, so without a
+     background it visually collides with the status chips. Lives on a pseudo-
+     element because backdrop-filter on the bar itself would make it the
+     containing block for the position:fixed menu sheet nested inside it. */
+  .crucible-topbar::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(to bottom, rgba(10,10,15,0.92), rgba(10,10,15,0.75));
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+
+  /* Topbar icon buttons (history clock etc.): real 44px touch targets */
+  .crucible-topbar-btn {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  /* History drawer close: match */
+  .crucible-drawer-close {
+    width: 44px !important;
+    height: 44px !important;
+  }
+
+  /* Copy buttons (message / answer / code header): grow the hit area without
+     moving the glyph — padding expands around the 14px icon. */
+  .crucible-copy-btn {
+    padding: 12px !important;
+    margin: -8px !important;
+  }
+
+  /* Feedback votes */
+  .crucible-vote-btn {
+    padding: 10px 12px !important;
+    font-size: 14px !important;
+  }
+
+  /* Remote Brain PiP exit: was 41x21 — untappable */
+  .crucible-pip-exit {
+    padding: 9px 16px !important;
+    font-size: 12px !important;
+  }
+
+  /* Composer pills (mode selector, Code toggle, Brain): thumb-sized */
+  .crucible-pill,
+  .crucible-pill--select {
+    min-height: 36px !important;
+    padding: 8px 12px !important;
+    font-size: 11px !important;
+  }
+  .crucible-pill span {
+    font-size: 11px !important;
   }
 
   /* Message list: tighter horizontal padding (bottom clearance handled by paddingBottom state) */
   .crucible-scroll {
-    padding-top: 16px !important;
-    padding-left: 12px !important;
-    padding-right: 12px !important;
+    padding-top: 14px !important;
+    padding-left: 14px !important;
+    padding-right: 14px !important;
   }
 
   /* Message content width: full bleed minus gutters */
   .crucible-msg-width {
-    max-width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 28px) !important;
   }
 
-  /* User bubble: wider on small screen */
+  /* User bubble: wider + comfortable reading size */
   .crucible-user-bubble {
     max-width: 88% !important;
+    font-size: 15px !important;
+    line-height: 1.55 !important;
+    padding: 10px 15px !important;
+    border-radius: 18px !important;
   }
+
+  /* Answer text: phone reading size. Desktop keeps its denser 13.5px. */
+  .crucible-synthesis {
+    font-size: 15px !important;
+    line-height: 1.7 !important;
+  }
+  .crucible-synthesis h1 { font-size: 18px !important; }
+  .crucible-synthesis h2 { font-size: 16px !important; }
+  .crucible-synthesis h3 { font-size: 15px !important; }
 
   /* Input bar container: hug the safe-area bottom.
-     12px sides to match the .crucible-scroll message gutter (no 2px stagger). */
+     14px sides to match the .crucible-scroll message gutter (no stagger). */
   .crucible-inputbar-wrap {
-    padding: 4px 12px calc(4px + env(safe-area-inset-bottom, 0px)) !important;
+    padding: 4px 14px calc(6px + env(safe-area-inset-bottom, 0px)) !important;
   }
 
-  /* Input box: full width */
+  /* Input box: full width, softer shape */
   .crucible-inputbox {
     max-width: 100% !important;
-    border-radius: 18px !important;
+    border-radius: 22px !important;
   }
 
   /* Textarea: bump to 16px to prevent iOS auto-zoom */
@@ -141,10 +258,10 @@ html, body, #root {
     font-size: 16px !important;
   }
 
-  /* Send/stop button: same height as pills in toolbar row */
+  /* Send/stop button: real thumb target (was pill-sized) */
   .crucible-send-btn {
-    width: 26px !important;
-    height: 26px !important;
+    width: 38px !important;
+    height: 38px !important;
     border-radius: 50% !important;
   }
 
@@ -155,18 +272,117 @@ html, body, #root {
     padding: 10px !important;
   }
 
-  /* Model cards: horizontal scroll strip instead of grid */
+  /* ── Menu: top-right dropdown becomes a bottom sheet (thumb reach) ─────── */
+  .crucible-menu-scrim {
+    display: block !important;
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 99 !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+    animation: fadeIn 0.2s ease-out;
+  }
+  .crucible-menu-panel {
+    position: fixed !important;
+    top: auto !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    max-height: 72dvh !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    border-radius: 20px 20px 0 0 !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: none !important;
+    padding: 10px 0 calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+    box-shadow: 0 -12px 48px rgba(0, 0, 0, 0.7) !important;
+    animation: sheetUp 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  /* Grab handle */
+  .crucible-menu-panel::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 2px auto 10px;
+  }
+  /* Menu rows: 48px tap targets, phone type size */
+  .crucible-menu-panel > button {
+    padding: 14px 20px !important;
+    font-size: 14.5px !important;
+    min-height: 48px !important;
+  }
+  /* Nested buttons too (e.g. the Google sign-in link) — never below 44px.
+     inline-flex because min-height is ignored on inline elements. */
+  .crucible-menu-panel button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: 13px;
+  }
+  /* Inline links (e.g. "sign in with Google"): pad the hit area without
+     inflating the text line. */
+  .crucible-menu-panel a {
+    display: inline-block;
+    padding: 14px 6px;
+    margin: -14px -6px;
+    font-size: 13px;
+  }
+
+  /* Tables: on a phone, wrapping cells beats hiding columns off-screen.
+     Headers stay nowrap for scanability; min-width keeps columns readable. */
+  .crucible-table-wrap td {
+    white-space: normal !important;
+    min-width: 96px;
+  }
+
+  /* ── Bottom sheets (Connected Devices etc.) ───────────────────────────── */
+  .crucible-sheet {
+    top: auto !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    transform: none !important;
+    width: 100% !important;
+    max-height: 86dvh !important;
+    border-radius: 20px 20px 0 0 !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-bottom: none !important;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)) 16px !important;
+    animation: sheetUp 0.28s cubic-bezier(0.22, 1, 0.36, 1) !important;
+  }
+  .crucible-sheet::before {
+    content: '';
+    display: block;
+    flex-shrink: 0;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 auto 4px;
+  }
+
+  /* Model cards: compact horizontal scroll strip — a status readout on the
+     phone, not the desktop dashboard. Slim padding keeps the composer high. */
   .crucible-model-cards {
     overflow-x: auto !important;
     flex-wrap: nowrap !important;
     -webkit-overflow-scrolling: touch !important;
     scrollbar-width: none !important;
     max-width: 100% !important;
+    margin-bottom: 6px !important;
   }
   .crucible-model-cards::-webkit-scrollbar { display: none; }
   .crucible-model-cards > * {
-    min-width: 110px !important;
+    min-width: 96px !important;
     flex-shrink: 0 !important;
+    padding: 5px 9px !important;
+    border-radius: 9px !important;
   }
   /* Right-edge fade as a scroll affordance — signals more cards off-screen */
   .crucible-model-cards {

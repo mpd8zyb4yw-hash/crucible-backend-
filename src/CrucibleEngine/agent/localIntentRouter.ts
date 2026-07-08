@@ -77,6 +77,24 @@ function resolvePlayMedia(m: string): LocalPlan | null {
   if (!match) return null
   const subject = stripPunct(match[1])
   if (!subject || subject.length < 2) return null
+
+  // ── Bail to the agent loop on multi-context commands ──────────────────────────
+  // The deterministic router only handles a SINGLE intent. Two failure modes it must
+  // NOT try to resolve (they need real planning + step-to-step context):
+  //
+  // 1. Compound command — another action verb precedes "play"
+  //    ("open youtube, search for be.busta, play one of the videos"). Here the regex
+  //    grabs "one of the videos" as the search query, which is nonsense.
+  // 2. Referential subject — the thing to play refers to a PRIOR step's result
+  //    ("play one of the videos", "play the first one", "play it"), not a literal query.
+  //
+  // In both cases return null so runAgentLoop plans it with full context (search the
+  // real subject → pick a result → play it).
+  const before = m.slice(0, match.index ?? 0)
+  if (/\b(?:open|launch|search|find|look up|go to|navigate|bring up|pull up|then|after that|and then|first)\b/i.test(before)) return null
+  if (/^(?:one|a|an|the|that|this|it|any|some|another|first|second|next|last|top)\b/i.test(subject)
+      && /\b(?:one|ones|video|videos|result|results|song|songs|track|tracks|clip|clips|thing|things|it|them)\b/i.test(subject)) return null
+
   const service = (match[2] ?? 'youtube').toLowerCase()
 
   if (service === 'spotify' || service === 'apple music' || service === 'music') {

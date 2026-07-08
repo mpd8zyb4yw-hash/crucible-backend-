@@ -28,8 +28,30 @@ function resolveApiBase(): string {
 
 export const API_BASE = resolveApiBase()
 
+// ── Remote Brain device credential (design spec §5.2) ───────────────────────
+// When this browser has paired as a remote device, its token rides every request
+// as x-crucible-device. The backend re-verifies per request, so revocation from
+// either surface kills the session immediately.
+
+const DEVICE_TOKEN_KEY = 'crucible_device_token'
+
+export function getDeviceToken(): string | null {
+  try { return localStorage.getItem(DEVICE_TOKEN_KEY) } catch { return null }
+}
+
+export function setDeviceToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(DEVICE_TOKEN_KEY, token)
+    else localStorage.removeItem(DEVICE_TOKEN_KEY)
+  } catch { /* private mode */ }
+}
+
 // Credentials-included fetch — used for all /api/* requests so httpOnly cookies
 // are sent automatically. Keeps every call site clean.
 export function apiFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, { credentials: 'include', ...init })
+  const token = getDeviceToken()
+  const headers = token
+    ? { ...(init?.headers as Record<string, string> | undefined), 'x-crucible-device': token }
+    : init?.headers
+  return fetch(url, { credentials: 'include', ...init, headers })
 }

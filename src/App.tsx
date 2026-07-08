@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { API_BASE, apiFetch } from './api'
+import { API_BASE, apiFetch, getDeviceToken, setDeviceToken } from './api'
 import CrucibleMark from './CrucibleMark'
 import './modelData'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
@@ -87,6 +88,7 @@ function ModeSwitcher({ mode, setMode, modeMenuOpen, setModeMenuOpen }: {
           <button
             key={m.id}
             onPointerDown={e => { e.stopPropagation(); setMode(m.id); setModeMenuOpen(false); haptic('light') }}
+            className="crucible-pill"
             title={meta.hint}
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
@@ -174,7 +176,7 @@ function CopyButton({ text, inline = false, title = 'Copy' }: { text: string; in
     setTimeout(() => setCopied(false), 1500)
   }
   return (
-    <button onClick={copy} title={title} aria-label={title} style={{
+    <button onClick={copy} title={title} aria-label={title} className="crucible-copy-btn" style={{
       // Inline: sits in a flex row (code header) so it never overlaps sibling labels.
       // Default: absolute overlay pinned to the top-right of a relative container.
       ...(inline
@@ -218,6 +220,7 @@ function FeedbackButtons({ query, synthesis, promptType }: { query: string; synt
         <button
           key={v}
           onClick={() => vote(v)}
+          className="crucible-vote-btn"
           title={v === 'up' ? 'Good answer' : 'Bad answer'}
           style={{
             background: voted === v ? (v === 'up' ? 'rgba(77,184,158,0.15)' : 'rgba(248,124,124,0.12)') : 'none',
@@ -303,6 +306,40 @@ interface Round {
   animaTruths?: Array<{ observation: string; domain: string; confidencePct: number; confirmingInstances: number; fragility: string }>
   // Confidence-gated response commitment (low-confidence factual/reasoning answers)
   uncertainCommitment?: { overallScore: number; resolvingStep: string }
+  // Natural-language tool builder session ("build me a tool that…")
+  builder?: BuilderView | null
+  // Tool refinement session ("make <tool> less chatty")
+  refine?: RefineView | null
+  // §4.1 — proactive tuning suggestion surfaced when a tool clusters in one domain
+  tuning?: { toolName: string; domain: string; uses: number; total: number; concentration: number } | null
+}
+
+// ── Tool refinement (design spec §4) — session state from /api/refine/* ───────
+interface RefineView {
+  id: string
+  status: 'proposed' | 'verified' | 'applied' | 'failed'
+  toolName: string
+  fromVersion: number
+  instruction: string
+  explanation: string
+  diffs: Array<{ field: string; old: string; new: string }>
+  smoke: { passed: boolean; steps: Array<{ args: Record<string, unknown>; before: { ok: boolean; output: string }; after: { ok: boolean; output: string } }>; error?: string } | null
+  error?: string
+}
+
+// ── Tool builder (design spec §2) — session state mirrored from /api/builder/* ─
+interface BuilderView {
+  id: string
+  status: 'clarifying' | 'drafted' | 'verified' | 'installed' | 'failed'
+  request: string
+  restatement: string
+  currentQuestion: string | null
+  answers: Array<{ question: string; answer: string }>
+  draft: { name: string; description: string; kind: string; triggerAliases: string[] } | null
+  dryRun: { passed: boolean; transcript: Array<{ args: Record<string, unknown>; ok: boolean; output: string }>; error?: string } | null
+  error?: string
+  /** §3.3 — matching tools from subscribed GitHub sources (suggestion, never a redirect). */
+  suggestions?: Array<{ repo: string; path: string; name: string; description: string; kind: string; license: string | null; updatedAt: string | null; defaultBranch: string }>
 }
 
 // ── Agent state (Section 7) — one reducer over the agent SSE event stream ─────
@@ -977,6 +1014,7 @@ function HistoryBinder({ onRestore }: { onRestore: (session: HistorySession) => 
       <button
         ref={triggerRef}
         onClick={() => setOpen(o => !o)}
+        className="crucible-topbar-btn"
         title="Session history"
         style={{
           background: open ? 'rgba(124,124,248,0.1)' : 'none',
@@ -1060,6 +1098,7 @@ function HistoryBinder({ onRestore }: { onRestore: (session: HistorySession) => 
             <button
               onClick={() => setOpen(false)}
               aria-label="Close"
+              className="crucible-drawer-close"
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', color: '#666',
                 width: 32, height: 32, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1233,6 +1272,554 @@ function CollapsibleCode({ language, code }: { language: string; code: string })
           codeTagProps={{ style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere', display: 'block' } }}
         >{code}</SyntaxHighlighter>
       </div>
+    </div>
+  )
+}
+
+// ── Connected Devices panel (design spec §5.2) ────────────────────────────────
+// Desktop: mint pairing codes, manage tiers, revoke any device. Phone: claim a
+// code to pair this browser as a remote device (token stored locally, sent as
+// x-crucible-device on every request), self-revoke as the kill switch.
+// Renders as a centered modal on desktop and a bottom sheet on mobile
+// (.crucible-sheet in mobile.css).
+interface DeviceRow { id: string; name: string; tier: string; createdAt: number; lastSeen: number | null; revokedAt: number | null }
+
+function DevicesPanel({ onClose }: { onClose: () => void }) {
+  const [devices, setDevices] = useState<DeviceRow[] | null>(null)
+  const [audit, setAudit] = useState<Array<{ ts?: number; deviceId: string; action: string; detail?: string; ok?: boolean }>>([])
+  const [showAudit, setShowAudit] = useState(false)
+  const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null)
+  const [claimCode, setClaimCode] = useState('')
+  const [claiming, setClaiming] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const thisDeviceId = (() => { try { return localStorage.getItem('crucible_device_id') } catch { return null } })()
+  const paired = !!getDeviceToken()
+
+  const refresh = () => {
+    apiFetch(`${API_BASE}/api/devices`).then(r => r.json()).then(d => setDevices(d.devices ?? [])).catch(() => setDevices([]))
+    apiFetch(`${API_BASE}/api/devices/audit?n=30`).then(r => r.json()).then(d => setAudit((d.entries ?? []).reverse())).catch(() => {})
+  }
+  useEffect(refresh, [])
+
+  const mintCode = async () => {
+    setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/pair/start`, { method: 'POST' })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'could not create code'); return }
+      setPairCode(d)
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+  }
+
+  const claim = async () => {
+    setClaiming(true); setError(null)
+    try {
+      const name = /iPhone|iPad|Android/i.test(navigator.userAgent) ? 'phone' : 'browser'
+      const r = await apiFetch(`${API_BASE}/api/pair/claim`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: claimCode.trim(), name: `${name} · ${new Date().toLocaleDateString()}` }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'pairing failed'); return }
+      setDeviceToken(d.token)
+      try { localStorage.setItem('crucible_device_id', d.id) } catch {}
+      setClaimCode('')
+      refresh()
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+    finally { setClaiming(false) }
+  }
+
+  const setTier = async (id: string, tier: string) => {
+    setError(null)
+    const r = await apiFetch(`${API_BASE}/api/devices/${id}/tier`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }),
+    })
+    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.error ?? 'tier change failed'); return }
+    refresh()
+  }
+
+  const revoke = async (id: string) => {
+    setError(null)
+    const r = await apiFetch(`${API_BASE}/api/devices/${id}/revoke`, { method: 'POST' })
+    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.error ?? 'revoke failed'); return }
+    if (id === thisDeviceId) { setDeviceToken(null); try { localStorage.removeItem('crucible_device_id') } catch {} }
+    refresh()
+  }
+
+  const tierColor: Record<string, string> = { observe: '#7c7cf8', build: '#fbbf24', full: '#f87171' }
+  const btn: React.CSSProperties = {
+    padding: '8px 14px', borderRadius: 9, fontSize: 12, fontWeight: 600,
+    border: '1px solid rgba(124,124,248,0.35)', background: 'rgba(124,124,248,0.12)',
+    color: '#c9c9ff', cursor: 'pointer', minHeight: 40,
+  }
+
+  return (
+    <>
+      <div className="crucible-sheet-scrim" onClick={onClose} style={{
+        position: 'fixed', inset: 0, zIndex: 190, background: 'rgba(0,0,0,0.55)',
+        animation: 'fadeIn 0.2s ease-out',
+      }} />
+      <div className="crucible-sheet" style={{
+        position: 'fixed', zIndex: 200, background: '#131318',
+        border: '1px solid rgba(255,255,255,0.09)',
+        display: 'flex', flexDirection: 'column', gap: 14,
+        padding: 18, overflowY: 'auto',
+        // Desktop default: centered modal. mobile.css turns this into a bottom sheet.
+        top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+        width: 'min(480px, 92vw)', maxHeight: '80vh', borderRadius: 16,
+        boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+        animation: 'panelUp 0.25s cubic-bezier(0.22,1,0.36,1)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#7c7cf8' }}>Connected Devices</span>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} aria-label="Close" style={{
+            background: 'none', border: 'none', cursor: 'pointer', color: '#666',
+            fontSize: 20, lineHeight: 1, padding: 8, minWidth: 40, minHeight: 40,
+          }}>×</button>
+        </div>
+
+        {/* Pair a new device (desktop mints; any surface can claim) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {!paired && (
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+              <input
+                value={claimCode}
+                onChange={e => setClaimCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="6-digit code"
+                inputMode="numeric"
+                style={{
+                  flex: '1 1 180px', minWidth: 0, padding: '10px 12px', borderRadius: 10, fontSize: 16,
+                  background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(124,124,248,0.25)',
+                  color: '#ddd', outline: 'none', letterSpacing: '0.2em', fontVariantNumeric: 'tabular-nums',
+                }}
+              />
+              <button disabled={claimCode.length !== 6 || claiming} onClick={claim} style={{ ...btn, opacity: claimCode.length === 6 && !claiming ? 1 : 0.4 }}>
+                pair this device
+              </button>
+            </div>
+          )}
+          {paired && (
+            <div style={{ fontSize: 12, color: '#4ade80' }}>This device is paired. Its tier is managed from the desktop.</div>
+          )}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+            <button onClick={mintCode} style={btn}>generate pairing code</button>
+            {pairCode && Date.now() < pairCode.expiresAt && (
+              <span style={{
+                fontSize: 22, fontWeight: 700, letterSpacing: '0.25em', color: '#e2e2ea',
+                fontVariantNumeric: 'tabular-nums', padding: '4px 10px',
+                background: 'rgba(124,124,248,0.1)', borderRadius: 10, border: '1px solid rgba(124,124,248,0.3)',
+              }}>{pairCode.code}</span>
+            )}
+            {pairCode && <span style={{ fontSize: 10.5, color: '#888' }}>valid 5 min, single use</span>}
+          </div>
+        </div>
+
+        {/* Device list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {devices === null && <div style={{ fontSize: 12, color: '#666' }}>loading…</div>}
+          {devices !== null && devices.filter(d => !d.revokedAt).length === 0 && (
+            <div style={{ fontSize: 12, color: '#666' }}>No paired devices yet.</div>
+          )}
+          {(devices ?? []).filter(d => !d.revokedAt).map(d => (
+            <div key={d.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const,
+              padding: '10px 12px', borderRadius: 12,
+              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)',
+            }}>
+              <div style={{ flex: '1 1 140px', minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: '#ddd', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                  {d.name}{d.id === thisDeviceId ? ' (this device)' : ''}
+                </div>
+                <div style={{ fontSize: 10, color: '#666' }}>
+                  {d.lastSeen ? `last seen ${new Date(d.lastSeen).toLocaleString()}` : 'never used'}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {(['observe', 'build', 'full'] as const).map(t => (
+                  <button key={t} onClick={() => setTier(d.id, t)} style={{
+                    padding: '6px 10px', borderRadius: 8, fontSize: 10.5, fontWeight: 700,
+                    letterSpacing: '0.05em', textTransform: 'uppercase' as const, cursor: 'pointer', minHeight: 34,
+                    background: d.tier === t ? `${tierColor[t]}22` : 'transparent',
+                    border: `1px solid ${d.tier === t ? tierColor[t] : 'rgba(255,255,255,0.1)'}`,
+                    color: d.tier === t ? tierColor[t] : '#555',
+                  }}>{t}</button>
+                ))}
+              </div>
+              <button onClick={() => revoke(d.id)} style={{
+                padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', minHeight: 34,
+                background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.3)', color: '#f87171',
+              }}>revoke</button>
+            </div>
+          ))}
+        </div>
+
+        {/* Audit log */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <button onClick={() => setShowAudit(o => !o)} style={{
+            background: 'none', border: 'none', cursor: 'pointer', color: '#7c7cf8',
+            fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700,
+            textAlign: 'left' as const, padding: '4px 0', minHeight: 32,
+          }}>{showAudit ? 'hide audit log' : `audit log (${audit.length})`}</button>
+          {showAudit && audit.map((e, i) => (
+            <div key={i} style={{
+              fontSize: 10.5, fontFamily: 'ui-monospace, monospace', color: e.ok === false ? '#f87171' : '#888',
+              wordBreak: 'break-word' as const, padding: '2px 0',
+            }}>
+              {e.ts ? new Date(e.ts).toLocaleTimeString() : ''} · {e.action}{e.detail ? ` · ${e.detail}` : ''}
+            </div>
+          ))}
+        </div>
+
+        {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+      </div>
+    </>
+  )
+}
+
+// ── Tool builder card — drives /api/builder/* for one session ────────────────
+// The install button only exists in the DOM when the server says status is
+// 'verified'; the server refuses installs without a passed dry run anyway, so the
+// UI can never even appear to install unverified work.
+function BuilderCard({ view, onUpdate }: { view: BuilderView; onUpdate: (s: BuilderView) => void }) {
+  const [answer, setAnswer] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  const call = async (path: string, body: Record<string, unknown>, label: string) => {
+    setBusy(label); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/builder/${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: view.id, ...body }),
+      })
+      const data = await r.json()
+      if (!r.ok) { setError(data.error ?? `${label} failed`); return }
+      onUpdate(data.session)
+      setAnswer('')
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally { setBusy(null) }
+  }
+
+  const statusLabel: Record<BuilderView['status'], string> = {
+    clarifying: 'clarifying scope',
+    drafted: 'draft ready - not yet verified',
+    verified: 'dry run passed - ready to install',
+    installed: 'installed',
+    failed: 'build failed',
+  }
+  const statusColor: Record<BuilderView['status'], string> = {
+    clarifying: '#7c7cf8', drafted: '#fbbf24', verified: '#4ade80', installed: '#4ade80', failed: '#f87171',
+  }
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600, letterSpacing: '0.04em',
+    border: '1px solid rgba(124,124,248,0.35)', background: enabled ? 'rgba(124,124,248,0.15)' : 'rgba(124,124,248,0.05)',
+    color: enabled ? '#c9c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+    transition: 'background 0.15s ease-in-out',
+  })
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(124,124,248,0.18)', borderRadius: 12, padding: 12,
+      background: 'rgba(124,124,248,0.04)', display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: statusColor[view.status], flexWrap: 'wrap' as const }}>
+        <span>tool builder</span>
+        <span style={{ color: '#555' }}>·</span>
+        <span>{statusLabel[view.status]}</span>
+        {busy && <span style={{ color: '#888', textTransform: 'none' as const, letterSpacing: 0 }}>· {busy}…</span>}
+      </div>
+
+      {view.restatement && (
+        <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>{view.restatement}</div>
+      )}
+
+      {(view.suggestions?.length ?? 0) > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#4db89e' }}>
+            from your subscribed sources
+          </div>
+          {view.suggestions!.map((s, i) => (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const,
+              padding: '7px 10px', borderRadius: 10,
+              background: 'rgba(77,184,158,0.05)', border: '1px solid rgba(77,184,158,0.18)',
+            }}>
+              <div style={{ flex: '1 1 140px', minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: '#ddd', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{s.name}</div>
+                <div style={{ fontSize: 10, color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{s.repo} · {s.license ?? 'no license'}</div>
+              </div>
+              <button
+                disabled={!!busy}
+                onClick={async () => {
+                  setBusy('importing'); setError(null)
+                  try {
+                    const r = await apiFetch(`${API_BASE}/api/sources/import`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ card: s }),
+                    })
+                    const d = await r.json()
+                    if (!r.ok) { setError(d.error ?? 'import failed'); return }
+                    if (d.installed) setNotice(`Imported '${d.name}' from ${s.repo}.${d.warning ? ` Note: ${d.warning}` : ''}`)
+                    else setError(`Not imported: ${d.reason}`)
+                  } catch (e: any) { setError(e?.message ?? String(e)) }
+                  finally { setBusy(null) }
+                }}
+                style={btn(!busy)}
+              >import</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {view.draft && (
+        <div style={{ fontSize: 11.5, color: '#999', display: 'flex', flexDirection: 'column', gap: 3, wordBreak: 'break-word' as const }}>
+          <div><span style={{ color: '#7c7cf8' }}>{view.draft.name}</span> — {view.draft.description}</div>
+          {view.draft.triggerAliases.length > 0 && (
+            <div style={{ color: '#666' }}>also responds to: {view.draft.triggerAliases.join(' · ')}</div>
+          )}
+        </div>
+      )}
+
+      {view.answers.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#777' }}>
+          {view.answers.map((a, i) => (
+            <div key={i} style={{ wordBreak: 'break-word' as const }}>{a.question} <span style={{ color: '#aaa' }}>{a.answer}</span></div>
+          ))}
+        </div>
+      )}
+
+      {view.status === 'clarifying' && view.currentQuestion && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 12.5, color: '#ddd', wordBreak: 'break-word' as const }}>{view.currentQuestion}</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+            <input
+              value={answer} onChange={e => setAnswer(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && answer.trim() && !busy) call('reply', { answer }, 'answering') }}
+              placeholder="your answer"
+              style={{ flex: '1 1 160px', minWidth: 0, padding: '6px 10px', borderRadius: 8, fontSize: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(124,124,248,0.25)', color: '#ddd', outline: 'none' }}
+            />
+            <button disabled={!answer.trim() || !!busy} onClick={() => call('reply', { answer }, 'answering')} style={btn(!!answer.trim() && !busy)}>answer</button>
+          </div>
+        </div>
+      )}
+
+      {(view.status === 'drafted' || view.status === 'verified') && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+          <button disabled={!!busy} onClick={() => call('dryrun', {}, 'dry running')} style={btn(!busy)}>
+            {view.dryRun ? 'run dry run again' : 'run dry run'}
+          </button>
+          {view.status === 'verified' && (
+            <button disabled={!!busy} onClick={() => call('install', {}, 'installing')} style={btn(!busy)}>install</button>
+          )}
+          {view.status === 'drafted' && (
+            <span style={{ fontSize: 10.5, color: '#888' }}>install unlocks after a passing dry run</span>
+          )}
+        </div>
+      )}
+
+      {view.dryRun && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: view.dryRun.passed ? '#4ade80' : '#f87171' }}>
+            dry run {view.dryRun.passed ? 'passed' : 'failed'}
+          </div>
+          {view.dryRun.transcript.map((t, i) => (
+            <div key={i} style={{ fontSize: 11, fontFamily: 'ui-monospace, monospace', background: 'rgba(0,0,0,0.25)', borderRadius: 8, padding: '6px 8px', overflowX: 'auto' as const }}>
+              <div style={{ color: '#888', wordBreak: 'break-all' as const }}>args: {JSON.stringify(t.args)}</div>
+              <div style={{ color: t.ok ? '#4ade80' : '#f87171', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>{t.ok ? 'ok' : 'fail'} - {t.output}</div>
+            </div>
+          ))}
+          {view.dryRun.error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.dryRun.error}</div>}
+        </div>
+      )}
+
+      {view.status === 'installed' && view.draft && (
+        <div style={{ fontSize: 12, color: '#4ade80' }}>
+          {view.draft.name} is installed and available in every session. Say "make {view.draft.name} …" style requests any time to refine it; every change is versioned and reversible.
+        </div>
+      )}
+
+      {notice && <div style={{ fontSize: 11.5, color: '#4ade80', wordBreak: 'break-word' as const }}>{notice}</div>}
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+    </div>
+  )
+}
+
+// ── Tool refinement card — drives /api/refine/* for one session ──────────────
+// Diff first, evidence second, apply last: the apply button only exists once the
+// server reports a passed smoke test (and the server refuses without one anyway).
+function RefineCard({ view, onUpdate }: { view: RefineView; onUpdate: (s: RefineView) => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const call = async (path: string, label: string) => {
+    setBusy(label); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/refine/${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: view.id }),
+      })
+      const data = await r.json()
+      if (!r.ok) { setError(data.error ?? `${label} failed`); return }
+      onUpdate(data.session)
+    } catch (e: any) {
+      setError(e?.message ?? String(e))
+    } finally { setBusy(null) }
+  }
+
+  const statusLabel: Record<RefineView['status'], string> = {
+    proposed: 'proposed - not yet verified',
+    verified: 'smoke test passed - ready to apply',
+    applied: 'applied',
+    failed: 'refinement failed',
+  }
+  const statusColor: Record<RefineView['status'], string> = {
+    proposed: '#fbbf24', verified: '#4ade80', applied: '#4ade80', failed: '#f87171',
+  }
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600, letterSpacing: '0.04em',
+    border: '1px solid rgba(124,124,248,0.35)', background: enabled ? 'rgba(124,124,248,0.15)' : 'rgba(124,124,248,0.05)',
+    color: enabled ? '#c9c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+    transition: 'background 0.15s ease-in-out',
+  })
+  const mono: React.CSSProperties = { fontSize: 11, fontFamily: 'ui-monospace, monospace', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(124,124,248,0.18)', borderRadius: 12, padding: 12,
+      background: 'rgba(124,124,248,0.04)', display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: statusColor[view.status], flexWrap: 'wrap' as const }}>
+        <span>refine {view.toolName} v{view.fromVersion}</span>
+        <span style={{ color: '#555' }}>·</span>
+        <span>{statusLabel[view.status]}</span>
+        {busy && <span style={{ color: '#888', textTransform: 'none' as const, letterSpacing: 0 }}>· {busy}…</span>}
+      </div>
+
+      {view.explanation && <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>{view.explanation}</div>}
+
+      {view.diffs.map((d, i) => (
+        <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#7c7cf8' }}>{d.field}</div>
+          <div style={{ ...mono, background: 'rgba(248,113,113,0.07)', borderLeft: '2px solid #f87171', borderRadius: 6, padding: '5px 8px', color: '#d9a0a0', overflowX: 'auto' as const }}>{d.old}</div>
+          <div style={{ ...mono, background: 'rgba(74,222,128,0.07)', borderLeft: '2px solid #4ade80', borderRadius: 6, padding: '5px 8px', color: '#a0d9b0', overflowX: 'auto' as const }}>{d.new}</div>
+        </div>
+      ))}
+
+      {view.status !== 'applied' && view.status !== 'failed' && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+          <button disabled={!!busy} onClick={() => call('smoke', 'smoke testing')} style={btn(!busy)}>
+            {view.smoke ? 'run smoke test again' : 'run smoke test'}
+          </button>
+          {view.status === 'verified' && (
+            <button disabled={!!busy} onClick={() => call('apply', 'applying')} style={btn(!busy)}>apply</button>
+          )}
+          {view.status === 'proposed' && (
+            <span style={{ fontSize: 10.5, color: '#888' }}>apply unlocks after a passing smoke test</span>
+          )}
+        </div>
+      )}
+
+      {view.smoke && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase' as const, fontWeight: 700, color: view.smoke.passed ? '#4ade80' : '#f87171' }}>
+            smoke test {view.smoke.passed ? 'passed' : 'failed'} · before / after
+          </div>
+          {view.smoke.steps.map((s, i) => (
+            <div key={i} style={{ fontSize: 11, fontFamily: 'ui-monospace, monospace', background: 'rgba(0,0,0,0.25)', borderRadius: 8, padding: '6px 8px', overflowX: 'auto' as const, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <div style={{ color: '#888', wordBreak: 'break-all' as const }}>args: {JSON.stringify(s.args)}</div>
+              <div style={{ color: '#999', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>before: {s.before.ok ? 'ok' : 'fail'} - {s.before.output}</div>
+              <div style={{ color: s.after.ok ? '#4ade80' : '#f87171', wordBreak: 'break-word' as const, whiteSpace: 'pre-wrap' as const }}>after: {s.after.ok ? 'ok' : 'fail'} - {s.after.output}</div>
+            </div>
+          ))}
+          {view.smoke.error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.smoke.error}</div>}
+        </div>
+      )}
+
+      {view.status === 'applied' && (
+        <div style={{ fontSize: 12, color: '#4ade80' }}>
+          Applied as v{view.fromVersion + 1}. The previous version is archived — say "roll back {view.toolName}" or use rollback_tool to restore it.
+        </div>
+      )}
+      {view.status === 'failed' && view.error && (
+        <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{view.error}</div>
+      )}
+
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
+    </div>
+  )
+}
+
+// ── Tuning suggestion banner (design spec §4.1) ──────────────────────────────
+// Proactive suggestion, never auto-applied. "Tune it" opens a normal refine
+// session (diff + before/after smoke gate); "Dismiss" suppresses this domain.
+function TuningBanner({ tuning, onRefine, onDismiss }: {
+  tuning: NonNullable<Round['tuning']>
+  onRefine: (view: RefineView) => void
+  onDismiss: () => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [gone, setGone] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (gone) return null
+  const domainLabel = tuning.domain.replace(/_/g, ' ')
+
+  const tune = async () => {
+    setBusy('proposing'); setError(null)
+    try {
+      const r = await apiFetch(`${API_BASE}/api/refine/start`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName: tuning.toolName, instruction: `Specialize this tool for ${domainLabel} tasks — it is used mostly in that domain.` }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setError(d.error ?? 'could not start refinement'); return }
+      apiFetch(`${API_BASE}/api/tools/suggestions/dismiss`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: tuning.toolName, domain: tuning.domain }),
+      }).catch(() => {})
+      onRefine(d.session)
+      setGone(true)
+    } catch (e: any) { setError(e?.message ?? String(e)) }
+    finally { setBusy(null) }
+  }
+
+  const dismiss = () => {
+    apiFetch(`${API_BASE}/api/tools/suggestions/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: tuning.toolName, domain: tuning.domain }),
+    }).catch(() => {})
+    onDismiss(); setGone(true)
+  }
+
+  const btn = (enabled: boolean): React.CSSProperties => ({
+    padding: '6px 14px', borderRadius: 8, fontSize: 11.5, fontWeight: 600,
+    border: '1px solid rgba(192,132,252,0.35)', background: enabled ? 'rgba(192,132,252,0.14)' : 'rgba(192,132,252,0.05)',
+    color: enabled ? '#e0c9ff' : '#666', cursor: enabled ? 'pointer' : 'default',
+  })
+
+  return (
+    <div style={{
+      animation: 'panelUp 0.3s cubic-bezier(0.22,1,0.36,1)',
+      border: '1px solid rgba(192,132,252,0.2)', borderRadius: 12, padding: 12,
+      background: 'rgba(192,132,252,0.05)', display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase' as const, fontWeight: 700, color: '#c084fc' }}>
+        tuning suggestion
+      </div>
+      <div style={{ fontSize: 12.5, color: '#ccc', wordBreak: 'break-word' as const }}>
+        You've used <strong style={{ color: '#e0c9ff' }}>{tuning.toolName}</strong> mostly for {domainLabel} work
+        ({tuning.uses} of {tuning.total} times). Want to tune it toward that domain? Nothing changes until you
+        review the diff and the before/after smoke test.
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+        <button disabled={!!busy} onClick={tune} style={btn(!busy)}>tune it</button>
+        <button disabled={!!busy} onClick={dismiss} style={{ ...btn(!busy), background: 'transparent', border: '1px solid rgba(255,255,255,0.12)', color: '#888' }}>dismiss</button>
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: '#f87171', wordBreak: 'break-word' as const }}>{error}</div>}
     </div>
   )
 }
@@ -1427,6 +2014,7 @@ export default function App() {
   const [rounds, setRounds]               = useState<Round[]>([])
   const [input, setInput]                 = useState('')
   const [menuOpen, setMenuOpen]           = useState(false)
+  const [devicesOpen, setDevicesOpen]     = useState(false)
   const [thinking, setThinking]           = useState(false)
   // ── Agent live timer ──────────────────────────────────────────────────────
   const [agentStartTime, setAgentStartTime]   = useState<number | null>(null)
@@ -2127,6 +2715,8 @@ export default function App() {
   const consumeStream = async (reader: ReadableStreamDefaultReader<Uint8Array>, roundId: string, userMessage: string) => {
     const decoder = new TextDecoder()
     let sseBuf = ''
+    let builderRound = false   // set when the server routes this round to the tool builder
+    let sawAgentEvent = false  // true once a real agent event (not a lone 'final') arrives
 
     while (true) {
       const { done, value } = await reader.read()
@@ -2142,8 +2732,42 @@ export default function App() {
         try {
           const parsed = JSON.parse(raw)
 
+          // ── Tool builder session — round becomes a builder card ────────────
+          if (parsed.type === 'builder_session') {
+            builderRound = true
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, builder: parsed.session }))
+            continue
+          }
+          if (parsed.type === 'refine_session') {
+            builderRound = true   // same handling: no agent state, direct final text
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, refine: parsed.session }))
+            continue
+          }
+          if (parsed.type === 'tool_tuning_suggestion') {
+            // Attach to the latest round (a tool fired during this turn's agent run).
+            const { type: _t, ...tuning } = parsed
+            setRounds(prev => {
+              if (!prev.length) return prev
+              const last = prev[prev.length - 1]
+              return prev.map(r => r.id !== last.id ? r : { ...r, tuning })
+            })
+            continue
+          }
+          if (builderRound && parsed.type === 'final') {
+            // Builder rounds have no agent state — take the text directly.
+            setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, synthesis: parsed.text ?? '', synthesisDone: true }))
+            continue
+          }
+
           // ── Agent loop events (Section 7) — fold through one reducer ────────
           if (AGENT_EVENT_TYPES.has(parsed.type)) {
+            // A lone 'final' with no preceding agent events (builder/refine error paths,
+            // simple replies) is just text — don't fabricate an empty agent panel for it.
+            if (parsed.type === 'final' && !sawAgentEvent) {
+              setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, synthesis: parsed.text ?? r.synthesis, synthesisDone: true }))
+              continue
+            }
+            if (parsed.type !== 'final') sawAgentEvent = true
             setRounds(prev => prev.map(r => r.id !== roundId ? r : { ...r, agent: agentReducer(r.agent, parsed) }))
             if (parsed.type === 'final') {
               // Agent's final summary doubles as the round's synthesis text.
@@ -2967,6 +3591,7 @@ export default function App() {
                 {/* Exit */}
                 <button
                   onClick={() => setRemoteBrain(false)}
+                  className="crucible-pip-exit"
                   style={{
                     background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(255,255,255,0.1)',
                     backdropFilter: 'blur(4px)',
@@ -2991,6 +3616,7 @@ export default function App() {
       )}
 
       {/* ── Top bar ── */}
+      {devicesOpen && <DevicesPanel onClose={() => setDevicesOpen(false)} />}
       <div className="crucible-topbar" style={{
         height: 40, display: 'flex', alignItems: 'center', padding: '0 16px 0 80px',
         background: 'transparent', flexShrink: 0,
@@ -3130,13 +3756,27 @@ export default function App() {
             ))}
           </button>
           {menuOpen && (
-            <div style={{
+            <>
+            {/* Mobile-only scrim (display:none on desktop via mobile.css) */}
+            <div className="crucible-menu-scrim" onClick={() => setMenuOpen(false)} style={{ display: 'none' }} />
+            <div className="crucible-menu-panel" style={{
               position: 'absolute', top: '100%', right: 0, zIndex: 100,
               background: '#111114', border: '1px solid rgba(255,255,255,0.08)',
               borderRadius: 10, padding: '4px 0', minWidth: 200,
               boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
             }}>
               {[
+                {
+                  label: 'Connected Devices',
+                  action: () => setDevicesOpen(true),
+                  icon: (
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="1.5" y="3" width="9" height="7" rx="1"/>
+                      <path d="M4 12.5h4"/>
+                      <rect x="11" y="6" width="3.5" height="7" rx="1"/>
+                    </svg>
+                  ),
+                },
                 {
                   label: 'API Keys',
                   action: () => alert('API Keys — coming soon'),
@@ -3300,13 +3940,14 @@ export default function App() {
                 <span style={{ flex: 1 }}>About</span>
               </button>
             </div>
+            </>
           )}
         </div>
       </div>
 
       {/* N1 — Governance panel */}
       {govPanelOpen && (
-        <div style={{
+        <div className="crucible-sheet" style={{
           position: 'fixed', top: 50, right: 16, zIndex: 200, width: 340, maxHeight: '70vh',
           background: '#111114', border: '1px solid rgba(255,255,255,0.08)',
           borderRadius: 12, boxShadow: '0 16px 48px rgba(0,0,0,0.7)',
@@ -3465,6 +4106,25 @@ export default function App() {
 
               {/* Agent loop panel (Section 7) */}
               {round.agent && <AgentPanel agent={round.agent} />}
+              {round.builder && (
+                <BuilderCard
+                  view={round.builder}
+                  onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, builder: s }))}
+                />
+              )}
+              {round.refine && (
+                <RefineCard
+                  view={round.refine}
+                  onUpdate={s => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, refine: s }))}
+                />
+              )}
+              {round.tuning && !round.refine && (
+                <TuningBanner
+                  tuning={round.tuning}
+                  onRefine={view => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, refine: view, tuning: null }))}
+                  onDismiss={() => setRounds(prev => prev.map(r => r.id !== round.id ? r : { ...r, tuning: null }))}
+                />
+              )}
 
               {/* Pipeline Theater — all model cards, shown when user message is clicked */}
               {round.expandedModel && <PipelineTheater round={round} />}
@@ -3571,14 +4231,17 @@ export default function App() {
                     })()}
                   </div>
                   <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '10px -18px 12px' }} />
-                  <div style={{ fontSize: 13.5, lineHeight: 1.75, color: '#d8d8e8', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere' as const, wordBreak: 'break-word' as const, userSelect: 'text' as const }}>
+                  <div className="crucible-synthesis" style={{ fontSize: 13.5, lineHeight: 1.75, color: '#d8d8e8', maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere' as const, wordBreak: 'break-word' as const, userSelect: 'text' as const }}>
                    <ReactMarkdown
+                     remarkPlugins={[remarkGfm]}
                      components={{
                        pre({ children }: any) { return <>{children}</> },
                        code({ node, className, children, ...props }: any) {
                          const match = /language-(\w+)/.exec(className || '')
-                         const isBlock = !props.inline
                          const code = String(children).replace(/\n$/, '')
+                         // react-markdown v9+ no longer passes an `inline` prop — a code
+                         // node is a block iff it has a language class or spans lines.
+                         const isBlock = !!match || code.includes('\n')
                          if (isBlock && match) {
                            return <CollapsibleCode language={match[1]} code={code} />
                          }
@@ -3603,6 +4266,15 @@ export default function App() {
                        h1({ children }: any) { return <h1 style={{ fontSize: 16, fontWeight: 700, margin: '14px 0 6px', color: '#fff' }}>{children}</h1> },
                        h2({ children }: any) { return <h2 style={{ fontSize: 14, fontWeight: 700, margin: '12px 0 5px', color: '#fff' }}>{children}</h2> },
                        h3({ children }: any) { return <h3 style={{ fontSize: 13, fontWeight: 600, margin: '10px 0 4px', color: 'rgba(255,255,255,0.8)' }}>{children}</h3> },
+                       // GFM tables: wide tables scroll inside their own container
+                       // instead of stretching the message column.
+                       table({ children }: any) {
+                         return (
+                           <div className="crucible-table-wrap">
+                             <table>{children}</table>
+                           </div>
+                         )
+                       },
                      }}
                    >{round.synthesis}</ReactMarkdown>
                    {round.synthStreaming && !round.synthesisDone && (
@@ -4198,6 +4870,7 @@ export default function App() {
             {isMobile && (
               <button
                 onClick={() => setRemoteBrain(r => !r)}
+                className="crucible-pill"
                 title="Remote Brain — control your Mac from this phone"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 4,
