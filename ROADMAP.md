@@ -1412,6 +1412,32 @@ which means the delay is now **capture-side, not transport**. Root cause: the ca
   small age + `fb` ⇒ Screen-Recording permission denied (living on the 2fps fallback); large age ⇒
   the pull loop isn't the active path.
 
+### 2026-07-08d — Remote Brain: FOUND IT — screencapture contention (the real latency cause)
+
+Root cause of the whole latency saga, finally isolated: **the phone loads the pre-built bundle
+in `app/` (served on :3001), not Vite dev** — so every client-side change (pull loop, binary
+transport, fps badge) was dead code that never reached the device. The phone has always run the
+legacy SSE client hitting `/api/screen-stream`. Worse, the server-side additions had each SSE
+viewer spawn its OWN `screencapture` loop *and* trigger the shared fallback capturer — 2+
+`screencapture` processes thrashing against each other and the desktopCapturer window, which is
+what drove latency to 15-20s (worse than the original).
+
+Fix — server-side only, reaches the existing phone client with **no rebuild**:
+- **`/api/screen-stream` is now a pure relay.** It forwards frames from the single shared capture
+  buffer and runs NO capture of its own. One capture source at a time: the desktopCapturer ingest
+  window, or — only when that isn't flowing — the one shared screencapture fallback loop. Contention
+  eliminated.
+- **Drain-accurate backpressure:** after a socket-filling write it pauses until Node's `drain`
+  event and always sends the NEWEST buffered frame, so latency is bounded to ~1 frame + RTT and a
+  slow phone just gets fewer fps instead of a growing stale backlog.
+
+Verified end-to-end against real sockets (standalone Node HTTP test): live relay sustains ~20fps
+delivering the newest frame, fallback takes over cleanly when live ingest stops, viewer count
+decrements on disconnect. The legacy base64-SSE protocol is unchanged, so the phone's current
+bundle works as-is. Remaining on-device dependency: macOS Screen-Recording permission (grants the
+20fps desktopCapturer path; without it the single screencapture fallback gives ~3fps but still
+sub-second, no contention).
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

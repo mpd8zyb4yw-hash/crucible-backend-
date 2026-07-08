@@ -4366,7 +4366,6 @@ app.post('/api/corpus/ingest-document', async (req, res) => {
 // decides whether the fallback capturer needs to run.
 let latestIngestFrame: Buffer | null = null
 let frameSeq = 0
-let latestIngestSeq = 0          // alias kept for the legacy SSE relay below
 let lastIngestAt = 0             // epoch ms of the most recent *live* ingest frame
 let lastScreenPullAt = 0         // epoch ms of the most recent phone frame-pull
 let screenViewerCount = 0        // active SSE viewers (legacy path)
@@ -4377,7 +4376,6 @@ const screenActive = () => screenViewerCount > 0 || (Date.now() - lastScreenPull
 function publishFrame(buf: Buffer, live: boolean) {
   latestIngestFrame = buf
   frameSeq++
-  latestIngestSeq = frameSeq
   if (live) lastIngestAt = Date.now()
 }
 
@@ -4527,18 +4525,22 @@ app.get('/_capture', (_req, res) => {
 </body></html>`)
 })
 
-// GET /api/screen-stream — SSE-based screen capture for Remote Brain mode.
+// GET /api/screen-stream — SSE relay for Remote Brain mode (legacy client transport).
 //
-// Why SSE instead of MJPEG multipart:
-//   iOS Safari has never supported multipart/x-mixed-replace in <img> tags, so
-//   MJPEG was silently broken on every iPhone/iPad. SSE (text/event-stream) works
-//   on every browser. Each event carries a base64-encoded JPEG frame; the client
-//   draws it to a <canvas> element.
+// SSE (text/event-stream) works on every browser including iOS Safari, where MJPEG
+// multipart never did. Each event carries a base64 JPEG the client draws to a canvas.
 //
-// Why the old screencapture command was broken:
-//   `-q 25` is not a valid screencapture flag on macOS. The flag was silently
-//   treated as an output filename, so the real tmpFile was never written and every
-//   frame triggered the readErr branch → infinite retry with no output.
+// This handler is now a PURE RELAY: it forwards frames from the single shared capture
+// buffer (`latestIngestFrame`, fed by the desktopCapturer ingest window or — only when
+// that isn't flowing — the one shared screencapture fallback loop). It does NOT run its
+// own capture. That matters: previously each SSE viewer spawned its own screencapture
+// loop *and* triggered the shared fallback, so 2+ screencapture processes thrashed
+// against each other and the capture window, starving the pipeline into multi-second lag.
+//
+// Backpressure is drain-accurate: after a write that fills the socket buffer we pause
+// until Node's 'drain' event, and we always send the NEWEST buffered frame (never a
+// queue of stale ones). That bounds glass-to-glass latency to ~1 frame + RTT even on a
+// slow link — a slow phone just gets fewer fps, never a growing backlog.
 //
 // No auth required — endpoint is LAN-scoped by the router ACL.
 app.get('/api/screen-stream', (req, res) => {
@@ -4546,83 +4548,47 @@ app.get('/api/screen-stream', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
   res.setHeader('Access-Control-Allow-Origin', '*')
-  // Flush headers + an immediate comment so EventSource fires `onopen` right away
-  // (the client flips to "connecting → live" without waiting for the first capture).
   res.flushHeaders()
   res.write(': connected\n\n')
   ;(res as any).flush?.()
 
-  // Target ~5fps. screencapture ≈ 250ms + sips ≈ 150ms → real cadence is ~400ms/frame
-  // regardless of this interval, but keeping it tight means we start the next capture
-  // immediately after the write rather than waiting an extra gap.
-  const FRAME_INTERVAL_MS = 80
-  const rawFile  = '/tmp/crucible_screen_raw.jpg'
-  const outFile  = '/tmp/crucible_screen_frame.jpg'
-  const captureCmd = `screencapture -x -t jpg ${rawFile} && sips -Z 1100 ${rawFile} --out ${outFile} -s format jpeg -s formatOptions 45 >/dev/null 2>&1 || cp ${rawFile} ${outFile}`
   debugBus.emit('model', 'screen_stream_start', {}, { severity: 'info' })
 
   let alive = true
   let framesSent = 0
-  screenViewerCount++
-  // SSE keep-alive ping every 20s — prevents iOS Safari from closing an idle connection
-  // while the user is typing and no frames are in-flight.
+  let draining = false
+  screenViewerCount++   // marks a live viewer → the shared capturer/ingest stay active
+
+  res.on('drain', () => { draining = false })
+
   const keepalive = setInterval(() => {
     if (!alive || res.writableEnded) { clearInterval(keepalive); return }
+    if (draining) return
     try { res.write(': ping\n\n'); (res as any).flush?.() } catch { alive = false }
   }, 20000)
+
+  // Relay the newest buffered frame whenever a new one appears (dedup by seq). Skips
+  // while the socket is draining, so we never stack frames behind a slow link.
+  let lastRelayedSeq = -1
+  const relay = setInterval(() => {
+    if (!alive || res.writableEnded) { clearInterval(relay); return }
+    if (draining || !latestIngestFrame || frameSeq === lastRelayedSeq) return
+    lastRelayedSeq = frameSeq
+    try {
+      const ok = res.write(`data: ${latestIngestFrame.toString('base64')}\n\n`)
+      ;(res as any).flush?.()
+      framesSent++
+      if (!ok) draining = true   // socket buffer full → wait for 'drain'
+    } catch { alive = false }
+  }, 15)
 
   req.on('close', () => {
     alive = false
     screenViewerCount = Math.max(0, screenViewerCount - 1)
     clearInterval(keepalive)
+    clearInterval(relay)
     debugBus.emit('model', 'screen_stream_stop', { framesSent }, { severity: 'info' })
   })
-
-  // Send a single JPEG buffer down the SSE channel, honouring backpressure. Returns
-  // false if the socket is backed up (caller should skip until it drains — this is
-  // what bounds latency: we never queue stale frames behind a slow network).
-  function sendFrame(frame: Buffer): boolean {
-    if ((res as any).writableNeedDrain || (res.socket && !res.socket.writable)) return false
-    try {
-      res.write(`data: ${frame.toString('base64')}\n\n`)
-      ;(res as any).flush?.()
-      framesSent++
-      return true
-    } catch { alive = false; return false }
-  }
-
-  // ── Real-time path: relay ingest frames from the Electron capture window ──────
-  // Poll the shared latest-frame buffer at a high rate and forward whenever a new
-  // frame has arrived (dedup by sequence number). This is push-latency-bound: a frame
-  // captured on the Mac reaches the phone within one poll tick + one network RTT.
-  let lastRelayedSeq = -1
-  const RELAY_TICK_MS = 15   // ~66Hz poll; actual fps is capped by the capture window
-  const relay = setInterval(() => {
-    if (!alive || res.writableEnded) { clearInterval(relay); return }
-    if (!ingestFresh()) return                 // no live feed → screencapture fallback drives
-    if (latestIngestSeq === lastRelayedSeq) return
-    if (latestIngestFrame && sendFrame(latestIngestFrame)) lastRelayedSeq = latestIngestSeq
-  }, RELAY_TICK_MS)
-  req.on('close', () => clearInterval(relay))
-
-  // ── Fallback path: screencapture loop, only while no live ingest feed is flowing.
-  // Gives phones the old ~2fps slideshow if desktopCapturer can't run (e.g. macOS
-  // Screen-Recording permission not granted for the app).
-  function captureFrame() {
-    if (!alive || res.writableEnded) return
-    if (ingestFresh()) { setTimeout(captureFrame, 500); return }  // real feed live → idle
-    exec(captureCmd, { timeout: 5000 }, (err) => {
-      if (!alive || res.writableEnded) return
-      if (err) { setTimeout(captureFrame, FRAME_INTERVAL_MS); return }
-      fs.readFile(outFile, (readErr, frame) => {
-        if (!alive || res.writableEnded) return
-        if (readErr || !frame?.length) { setTimeout(captureFrame, FRAME_INTERVAL_MS); return }
-        if (!ingestFresh()) sendFrame(frame)
-        setTimeout(captureFrame, FRAME_INTERVAL_MS)
-      })
-    })
-  }
-  captureFrame()
 })
 
 // GET /api/remote-brain/status — check if Remote Brain tools are available
