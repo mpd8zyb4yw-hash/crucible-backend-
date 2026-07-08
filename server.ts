@@ -4360,29 +4360,96 @@ app.post('/api/corpus/ingest-document', async (req, res) => {
 // If ingest stops (screen-recording permission denied, capture window crashed), the
 // SSE handler falls back to the old screencapture loop, so behavior is never worse
 // than before — it just degrades from video to a slideshow.
+// `latestIngestFrame` holds the single most-recent JPEG frame from ANY source (live
+// desktopCapturer ingest, or the screencapture fallback). `frameSeq` bumps on every new
+// frame so viewers can dedup. `lastIngestAt` tracks only *live* ingest, so `ingestFresh()`
+// decides whether the fallback capturer needs to run.
 let latestIngestFrame: Buffer | null = null
-let latestIngestSeq = 0          // bumps on every new ingest frame
-let lastIngestAt = 0             // epoch ms of the most recent ingest frame
-let screenViewerCount = 0        // active SSE viewers — gates capture to save CPU
+let frameSeq = 0
+let latestIngestSeq = 0          // alias kept for the legacy SSE relay below
+let lastIngestAt = 0             // epoch ms of the most recent *live* ingest frame
+let lastScreenPullAt = 0         // epoch ms of the most recent phone frame-pull
+let screenViewerCount = 0        // active SSE viewers (legacy path)
 
-const ingestFresh = () => latestIngestFrame != null && (Date.now() - lastIngestAt) < 2000
+const ingestFresh = () => (Date.now() - lastIngestAt) < 2000
+const screenActive = () => screenViewerCount > 0 || (Date.now() - lastScreenPullAt) < 2500
+
+function publishFrame(buf: Buffer, live: boolean) {
+  latestIngestFrame = buf
+  frameSeq++
+  latestIngestSeq = frameSeq
+  if (live) lastIngestAt = Date.now()
+}
 
 // POST /api/screen-ingest — receive one JPEG frame from the Electron capture window.
 // LAN/localhost only (router ACL + it's the Mac posting to itself). Raw body, no auth.
 app.post('/api/screen-ingest', express.raw({ type: () => true, limit: '20mb' }), (req, res) => {
   const body = req.body as Buffer
-  if (Buffer.isBuffer(body) && body.length > 0) {
-    latestIngestFrame = body
-    latestIngestSeq++
-    lastIngestAt = Date.now()
-  }
+  if (Buffer.isBuffer(body) && body.length > 0) publishFrame(body, true)
   res.status(204).end()
 })
 
 // GET /api/screen-ingest/active — the capture window polls this so it can stop
 // encoding/POSTing frames when no phone is watching (saves CPU + battery).
 app.get('/api/screen-ingest/active', (_req, res) => {
-  res.json({ active: screenViewerCount > 0 })
+  res.json({ active: screenActive() })
+})
+
+// ── Fallback capturer ─────────────────────────────────────────────────────────
+// When a phone is watching but the live desktopCapturer feed isn't flowing (e.g. macOS
+// Screen-Recording permission denied), keep the slideshow alive via screencapture. One
+// shared loop for all viewers — self-gates on activity + freshness, so it costs nothing
+// when the live feed is healthy or nobody's watching.
+{
+  const rawFile = '/tmp/crucible_screen_raw.jpg'
+  const outFile = '/tmp/crucible_screen_frame.jpg'
+  const cmd = `screencapture -x -t jpg ${rawFile} && sips -Z 1100 ${rawFile} --out ${outFile} -s format jpeg -s formatOptions 45 >/dev/null 2>&1 || cp ${rawFile} ${outFile}`
+  let capturing = false
+  const tick = () => {
+    if (!capturing && screenActive() && !ingestFresh()) {
+      capturing = true
+      exec(cmd, { timeout: 5000 }, (err) => {
+        if (err) { capturing = false; return }
+        fs.readFile(outFile, (readErr, frame) => {
+          if (!readErr && frame?.length && !ingestFresh()) publishFrame(frame, false)
+          capturing = false
+        })
+      })
+    }
+  }
+  setInterval(tick, 120)
+}
+
+// GET /api/screen-frame — client-pull frame transport (the real low-latency path).
+//
+// The phone fetches one frame, renders it, then immediately requests the next. Because
+// only ONE frame is ever in flight, latency = 1 RTT + render — a slow link just lowers
+// fps instead of accumulating a multi-second backlog of stale frames (which is exactly
+// what the blind SSE push did: the kernel TCP send buffer buffered seconds of frames
+// invisibly to Node's backpressure check). Binary body — no base64 33% inflation.
+//
+// Long-poll: if the client's last-seen `since` seq is already current, hold the request
+// (up to ~1s) until a newer frame lands, then respond. 204 if none appears.
+app.get('/api/screen-frame', (req, res) => {
+  lastScreenPullAt = Date.now()
+  const since = parseInt(String(req.query.since ?? '0'), 10) || 0
+  const deadline = Date.now() + 1000
+  const trySend = () => {
+    if (res.writableEnded) return
+    if (latestIngestFrame && frameSeq > since) {
+      res.setHeader('Content-Type', 'image/jpeg')
+      res.setHeader('X-Frame-Seq', String(frameSeq))
+      res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      res.setHeader('Access-Control-Expose-Headers', 'X-Frame-Seq')
+      res.end(latestIngestFrame)
+      return
+    }
+    if (Date.now() >= deadline) { res.status(204).setHeader('Access-Control-Allow-Origin', '*'); res.end(); return }
+    setTimeout(trySend, 15)
+  }
+  req.on('close', () => { /* client bailed; trySend guards on writableEnded */ })
+  trySend()
 })
 
 // GET /_capture — the page loaded by the hidden Electron capture window. It grabs a

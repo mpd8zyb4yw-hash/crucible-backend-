@@ -1448,7 +1448,6 @@ export default function App() {
   const [streamStatus, setStreamStatus] = useState<'connecting'|'live'|'error'>('connecting')
   const [streamFps, setStreamFps] = useState(0)
   const screenCanvasRef = useRef<HTMLCanvasElement>(null)
-  const streamEsRef = useRef<EventSource | null>(null)
   const preBrainModeRef = useRef<'quorum'|'code'|'seeker'>('quorum')
   const fpsCounterRef = useRef({ count: 0, last: 0 })
   const [pipPos, setPipPos] = useState<{x:number,y:number}>({ x: 12, y: 60 })
@@ -1529,32 +1528,25 @@ export default function App() {
     }
   }, [remoteBrain])
 
-  // SSE screen stream — uses createImageBitmap (async GPU decode, no main-thread block)
-  // + requestAnimationFrame so frames paint without janking the UI.
+  // Screen stream — client-PULL transport for minimum latency.
+  //
+  // The phone fetches one binary JPEG frame, renders it, then immediately requests the
+  // next (long-poll: the server holds the request until a newer frame exists). Only one
+  // frame is ever in flight, so latency = 1 RTT + render — a slow link just drops fps
+  // instead of building the multi-second stale-frame backlog that the old SSE push
+  // suffered (frames buffered invisibly in the kernel TCP send buffer). Binary body, so
+  // no base64 inflation and no main-thread atob decode. GPU decode via createImageBitmap,
+  // painted on requestAnimationFrame.
   useEffect(() => {
-    if (!remoteBrain) {
-      streamEsRef.current?.close()
-      streamEsRef.current = null
-      return
-    }
+    if (!remoteBrain) return
     setStreamStatus('connecting')
     setStreamFps(0)
     fpsCounterRef.current = { count: 0, last: performance.now() }
 
-    const es = new EventSource(`${API_BASE}/api/screen-stream?t=${Date.now()}`)
-    streamEsRef.current = es
-    apiFetch(`${API_BASE}/api/remote-brain/status`).then(r => r.json()).then((s) => {
-      if (!streamEsRef.current) return
-      const lanUrl = s.screenStream
-      if (lanUrl && !lanUrl.includes(window.location.hostname)) {
-        streamEsRef.current.close()
-        const es2 = new EventSource(`${lanUrl}?t=${Date.now()}`)
-        streamEsRef.current = es2
-      }
-    }).catch(() => {})
-
+    let cancelled = false
     let pendingBitmap: ImageBitmap | null = null
     let rafId = 0
+    let baseUrl = `${API_BASE}/api/screen-frame`   // may be swapped to a direct LAN URL below
 
     const paintLoop = () => {
       if (pendingBitmap) {
@@ -1565,7 +1557,6 @@ export default function App() {
           canvas.getContext('2d')?.drawImage(pendingBitmap, 0, 0)
           pendingBitmap.close()
           pendingBitmap = null
-          // fps counter
           const fr = fpsCounterRef.current
           fr.count++
           const now = performance.now()
@@ -1580,27 +1571,43 @@ export default function App() {
     }
     rafId = requestAnimationFrame(paintLoop)
 
-    let frameSeq = 0
-    es.onopen = () => setStreamStatus('live')
-    es.onerror = () => setStreamStatus('error')
-    es.onmessage = (e) => {
-      setStreamStatus('live')
-      const seq = ++frameSeq
-      // Decode asynchronously off the rAF path — createImageBitmap does GPU decode.
-      const bin = atob(e.data)
-      const buf = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-      const blob = new Blob([buf], { type: 'image/jpeg' })
-      createImageBitmap(blob).then(bmp => {
-        if (seq < frameSeq) { bmp.close(); return } // drop stale frame
-        pendingBitmap?.close()
-        pendingBitmap = bmp
-      }).catch(() => {})
+    // Prefer streaming straight from the Mac's LAN IP (port 3001) — skips the Vite dev
+    // proxy, which buffers and adds latency. Derive it from the status endpoint's URL.
+    apiFetch(`${API_BASE}/api/remote-brain/status`).then(r => r.json()).then((s) => {
+      const lanUrl: string | undefined = s.screenStream
+      if (lanUrl && !lanUrl.includes(window.location.hostname)) {
+        baseUrl = lanUrl.replace(/\/api\/screen-stream$/, '/api/screen-frame')
+      }
+    }).catch(() => {})
+
+    let seq = 0
+    const pull = async () => {
+      while (!cancelled) {
+        try {
+          const resp = await fetch(`${baseUrl}?since=${seq}`, { cache: 'no-store' })
+          if (cancelled) return
+          if (resp.status === 204) continue          // no new frame within poll window; retry
+          if (!resp.ok) { setStreamStatus('error'); await new Promise(r => setTimeout(r, 500)); continue }
+          const hdr = resp.headers.get('X-Frame-Seq')
+          if (hdr) seq = parseInt(hdr, 10) || seq
+          const blob = await resp.blob()
+          if (cancelled || !blob.size) continue
+          const bmp = await createImageBitmap(blob)
+          if (cancelled) { bmp.close(); return }
+          pendingBitmap?.close()
+          pendingBitmap = bmp
+          setStreamStatus('live')
+        } catch {
+          if (cancelled) return
+          setStreamStatus('error')
+          await new Promise(r => setTimeout(r, 500))
+        }
+      }
     }
+    pull()
 
     return () => {
-      es.close()
-      streamEsRef.current = null
+      cancelled = true
       cancelAnimationFrame(rafId)
       pendingBitmap?.close()
     }

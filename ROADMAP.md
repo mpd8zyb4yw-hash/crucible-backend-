@@ -1371,6 +1371,29 @@ syntax OK. **On-device gap (cannot verify from Linux CI):** macOS Screen-Recordi
 for the Crucible app, and actual fps/latency over the user's network. If still laggy after relaunch,
 check System Settings → Privacy → Screen Recording.
 
+### 2026-07-08b — Remote Brain: client-pull transport (kills the residual 6-8s buffering lag)
+
+After the desktopCapturer change (2026-07-08) got capture to real-time, ~6-8s of lag remained —
+this was **transport buffering**, not capture rate. The SSE push pumped 20fps of base64-inflated
+frames blindly into the socket; the kernel TCP send buffer (megabytes, invisible to Node's
+`writableNeedDrain`) absorbed them faster than WiFi drained, so a multi-second backlog of *stale*
+frames accumulated. Pushing can't fix this — the sender never learns the link is behind.
+
+Replaced the push with a **client-pull loop**:
+- **`server.ts`** — new `GET /api/screen-frame`: long-poll returning the newest JPEG as a **binary**
+  body (no base64) + `X-Frame-Seq`. Holds the request up to 1s until a frame newer than the client's
+  `?since=` seq exists. Unified `publishFrame()` feeds both live ingest and the fallback capturer,
+  which is now a single shared self-gating loop (runs only while `screenActive()` and `!ingestFresh()`).
+  Capture-active gate now keyed on recent pulls too.
+- **`App.tsx`** — replaced the `EventSource` push with an async fetch loop: fetch one frame → GPU
+  decode → paint → immediately request the next. Only ONE frame is ever in flight, so latency =
+  1 RTT + render and a slow link just lowers fps instead of building a stale backlog. Removed the
+  now-unused `streamEsRef`.
+
+Verified: pull/dedup/newest-only/fallback-gating logic passes a standalone Node simulation (the
+"newest-only" case proves a client behind by N frames jumps straight to the latest, never replaying
+stale frames). On-device fps/latency + macOS Screen-Recording permission still need user confirmation.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
