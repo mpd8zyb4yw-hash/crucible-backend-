@@ -10,28 +10,59 @@
 // discriminates: passages that share content words score high, unrelated ones
 // score near zero. See the 2026-06-14 changelog.
 
+import path from 'path'
 import type { Pipeline } from '@xenova/transformers'
 
+// The ONNX embedder weights (~23MB quantized) are fetched from HuggingFace by
+// transformers.js on first use. Two things make that robust instead of fragile:
+//   • Persistent cache dir — transformers.js writes completed files here (not under
+//     node_modules, which gets wiped), so a finished download survives app restarts
+//     and is never re-fetched. Overridable via CRUCIBLE_MODEL_CACHE.
+//   • No permanent latch-off — an interrupted/failed load (dropped connection during
+//     the download) previously disabled ONNX for the WHOLE process, silently degrading
+//     every later embedding to the weak hash fallback until restart. Now a failure just
+//     clears the in-flight promise and is retried after a short cooldown, so a transient
+//     network blip self-heals (transformers.js reuses any completed cache; otherwise it
+//     retries the fetch).
+const MODEL_CACHE_DIR = process.env.CRUCIBLE_MODEL_CACHE
+  ?? path.join(process.cwd(), '.crucible', 'models-cache')
+const RETRY_COOLDOWN_MS = 30_000
+
 let _pipeline: Pipeline | null = null
-let _pipelineLoading: Promise<Pipeline> | null = null
-let _onnxAvailable = true
+let _pipelineLoading: Promise<Pipeline | null> | null = null
+let _lastFailureAt = 0
+let _envConfigured = false
 
 async function loadPipeline(): Promise<Pipeline | null> {
-  if (!_onnxAvailable) return null
   if (_pipeline) return _pipeline
   if (_pipelineLoading) return _pipelineLoading
+  // Back off between attempts so a genuinely-offline box doesn't try to fetch on every
+  // embed() call — but DO retry after the cooldown instead of latching off forever.
+  if (_lastFailureAt && Date.now() - _lastFailureAt < RETRY_COOLDOWN_MS) return null
 
   _pipelineLoading = (async () => {
     try {
-      const { pipeline } = await import('@xenova/transformers')
-      const p = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+      const transformers = await import('@xenova/transformers')
+      if (!_envConfigured) {
+        // Point transformers.js at a persistent cache so completed downloads survive
+        // restarts and aren't re-fetched from 0.
+        transformers.env.cacheDir = MODEL_CACHE_DIR
+        _envConfigured = true
+      }
+      const p = await transformers.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
         quantized: true,
       }) as Pipeline
       _pipeline = p
+      _lastFailureAt = 0
       return p
     } catch {
-      _onnxAvailable = false
-      return null as unknown as Pipeline
+      // Transient (network) or hard (package missing) — either way, don't disable ONNX
+      // permanently. Record the time; the next call after the cooldown retries.
+      _lastFailureAt = Date.now()
+      _pipeline = null
+      return null
+    } finally {
+      _pipelineLoading = null
     }
   })()
 
@@ -110,12 +141,15 @@ export function hashProject(text: string): Float32Array {
   return vec
 }
 
+// Reflects the ACTUAL loaded state (not an optimistic guess), so embeddingDim() always
+// matches what embed() will produce. Callers that need a settled answer must await
+// ensureEmbedderReady() first (see below).
 export function isOnnxAvailable(): boolean {
-  return _onnxAvailable
+  return _pipeline !== null
 }
 
 export function embeddingDim(): number {
-  return _onnxAvailable ? 384 : FALLBACK_DIMS
+  return _pipeline !== null ? 384 : FALLBACK_DIMS
 }
 
 // Settle ONNX availability BEFORE callers read embeddingDim(). Without this, the

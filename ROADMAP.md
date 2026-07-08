@@ -1354,6 +1354,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07p — FOUND the actual model download + fixed its interruption behavior
+
+"find it" — traced the model-download the user experiences. There is NO bespoke downloader
+in the repo (the local LLM is the OS-resident Apple FM daemon, `sizeBytes: 0`; Track A's
+downloadable ONNX models — SmolLM2/Gemma per `contracts.ts` `family`/`sizeBytes`/`installed`
+— were designed but never landed: `localModels/registry.ts` is still the placeholder, no
+`onnxAdapter.ts`). The ONE thing that actually downloads model weights is
+**`@xenova/transformers` fetching `Xenova/all-MiniLM-L6-v2` (quantized ONNX, ~23MB) from
+HuggingFace** in `masterpiece/corpus/embed.ts:loadPipeline()` — the corpus embedder.
+
+Two real defects there, both matching the report ("resets to 0 / breaks on connection loss"):
+1. **No persistence** — transformers.js cached under `node_modules/.cache` (wiped on
+   reinstall) with no explicit persistent dir, so a completed download could vanish.
+   Fix: `env.cacheDir = .crucible/models-cache` (override `CRUCIBLE_MODEL_CACHE`), so a
+   finished download survives restarts and is never re-fetched.
+2. **Permanent latch-off** — ANY failure (a dropped connection mid-download) set
+   `_onnxAvailable = false` for the whole process AND never cleared `_pipelineLoading`, so
+   one interrupted download silently degraded EVERY later embedding to the weak 256-dim hash
+   fallback until a full server restart. Fix: no permanent disable — record the failure time,
+   clear the in-flight promise, and retry after a 30s cooldown, so a transient blip
+   self-heals (reusing any completed cache). `isOnnxAvailable()`/`embeddingDim()` now key off
+   the actually-loaded pipeline so the reported dim always matches what `embed()` produces.
+- Verified: fallback path exercised in-sandbox (ONNX import fails on unbuilt `sharp`) — dim
+  256, vectors self-consistent, post-failure calls fast (cooldown honored), no permanent
+  latch. Typecheck clean. `env.cacheDir` confirmed a real API in the installed
+  transformers.js.
+
+Not done (bigger, egress-dependent): true mid-file BYTE resume of the HF fetch would mean
+wiring `modelDownloader.ts` (07o) into transformers.js's exact cache layout to pre-fetch the
+weights resumably. The above makes a *completed* download persistent and makes interruptions
+self-healing instead of permanently degrading; mid-file resume of that specific fetch is the
+remaining piece and needs a machine with egress to build+test against the real HF CDN.
+
 ### 2026-07-07o — Multi-context command fix + persistent resumable downloads
 
 Two user-reported bugs.
