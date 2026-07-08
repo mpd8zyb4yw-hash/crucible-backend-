@@ -1438,6 +1438,22 @@ bundle works as-is. Remaining on-device dependency: macOS Screen-Recording permi
 20fps desktopCapturer path; without it the single screencapture fallback gives ~3fps but still
 sub-second, no contention).
 
+### 2026-07-08e — Remote Brain: THE bug — /api/screen-ingest was 401'ing (auth guard)
+
+The `/api/*` auth guard only exempted `/api/screen-stream`. Every other screen endpoint
+required a cookie. The Electron capture window POSTs frames to `/api/screen-ingest` from a
+separate cookieless window, so **every ingest frame got 401** — `publishFrame` never ran,
+`ingestFresh()` was always false, and the stream silently ran on the ~3fps `screencapture`
+fallback for the entire latency investigation. `/api/screen-ingest/active` also 401'd, so
+the capture window never even started `getDisplayMedia`. Surfaced when `/api/screen-diag`
+returned "unauthorized" to a plain curl.
+
+Fix: exempt all `/api/screen-*` (LAN-scoped, cookieless by design — same rationale as the
+existing screen-stream exemption). This unblocks the desktopCapturer path; with Screen-
+Recording permission granted the relay now gets real 15-20fps ingest instead of the
+fallback. Also fixes the diag endpoint's own 401. Frame size also cut to 1024px/q0.4-0.45
+to reduce per-frame transfer latency.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
