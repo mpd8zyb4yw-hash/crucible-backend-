@@ -475,10 +475,15 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   next()
 }
 
-// Auth guard — all /api/* except /api/auth/*, /api/screen-stream, and /api/diag
+// Auth guard — all /api/* except /api/auth/*, the LAN-scoped screen endpoints, and /api/diag.
 app.use('/api', (req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (req.path.startsWith('/auth/')) return next()
-  if (req.path === '/screen-stream') return next()   // no cookie on phone; LAN-only stream
+  // All /api/screen-* endpoints are LAN-only and cookieless by design: the phone viewer
+  // (screen-stream / screen-frame) and the Electron capture window (screen-ingest*, run in
+  // a separate window with no app cookie) both hit these without credentials. Requiring
+  // auth here 401s every ingest POST, which silently kills the fast desktopCapturer path
+  // and drops the stream to the slow screencapture fallback.
+  if (req.path.startsWith('/screen-')) return next()
   if (req.path === '/diag') return next()            // diagnostic endpoint — no auth needed
   return requireAuth(req, res, next)
 })
