@@ -1447,6 +1447,7 @@ export default function App() {
   const [remoteBrain, setRemoteBrain] = useState(false)
   const [streamStatus, setStreamStatus] = useState<'connecting'|'live'|'error'>('connecting')
   const [streamFps, setStreamFps] = useState(0)
+  const [streamStat, setStreamStat] = useState<{ age: number; live: boolean } | null>(null)
   const screenCanvasRef = useRef<HTMLCanvasElement>(null)
   const preBrainModeRef = useRef<'quorum'|'code'|'seeker'>('quorum')
   const fpsCounterRef = useRef({ count: 0, last: 0 })
@@ -1590,6 +1591,8 @@ export default function App() {
           if (!resp.ok) { setStreamStatus('error'); await new Promise(r => setTimeout(r, 500)); continue }
           const hdr = resp.headers.get('X-Frame-Seq')
           if (hdr) seq = parseInt(hdr, 10) || seq
+          const ageHdr = resp.headers.get('X-Frame-Age')
+          if (ageHdr != null) setStreamStat({ age: parseInt(ageHdr, 10) || 0, live: resp.headers.get('X-Frame-Live') === '1' })
           const blob = await resp.blob()
           if (cancelled || !blob.size) continue
           const bmp = await createImageBitmap(blob)
@@ -2951,7 +2954,7 @@ export default function App() {
               {/* fps — only when live */}
               {streamStatus === 'live' && streamFps > 0 ? (
                 <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)', fontVariantNumeric: 'tabular-nums', letterSpacing: '0.05em' }}>
-                  {streamFps} fps
+                  {streamFps} fps{streamStat ? ` · ${streamStat.age}ms${streamStat.live ? '' : ' fb'}` : ''}
                 </span>
               ) : <span />}
 

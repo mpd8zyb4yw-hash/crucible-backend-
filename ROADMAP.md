@@ -1394,6 +1394,24 @@ Verified: pull/dedup/newest-only/fallback-gating logic passes a standalone Node 
 "newest-only" case proves a client behind by N frames jumps straight to the latest, never replaying
 stale frames). On-device fps/latency + macOS Screen-Recording permission still need user confirmation.
 
+### 2026-07-08c — Remote Brain: fix off-screen capture throttling + add latency diagnostics
+
+Pull transport (2026-07-08b) only got to ~5-6s — anomalous for a single-frame-in-flight design,
+which means the delay is now **capture-side, not transport**. Root cause: the capture window was
+`show:false`. Chromium throttles/stalls the `<video>` element feeding a non-rendering window, so
+`drawImage(video)` grabs frames that are seconds stale.
+
+- **`electron.cjs`** — capture window now `show:true` but parked off-screen (x/y -4000,
+  `skipTaskbar`, `focusable:false`, `setIgnoreMouseEvents`). The user never sees it, but the
+  compositor keeps the video pipeline live at full rate.
+- **`server.ts` `/_capture`** — draw+POST now driven by `requestVideoFrameCallback` (fires per
+  decoded frame → lowest latency, no stale re-draws), falling back to a timer where unavailable.
+- **Diagnostics** — `/api/screen-frame` now returns `X-Frame-Age` (ms the frame sat in the server
+  buffer) and `X-Frame-Live` (live feed vs screencapture fallback). `App.tsx` shows them inline by
+  the fps counter (`12 fps · 40ms`, `fb` = fallback). This makes the next measurement diagnostic:
+  small age + `fb` ⇒ Screen-Recording permission denied (living on the 2fps fallback); large age ⇒
+  the pull loop isn't the active path.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

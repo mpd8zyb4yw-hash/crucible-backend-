@@ -4439,9 +4439,15 @@ app.get('/api/screen-frame', (req, res) => {
     if (latestIngestFrame && frameSeq > since) {
       res.setHeader('Content-Type', 'image/jpeg')
       res.setHeader('X-Frame-Seq', String(frameSeq))
+      // Diagnostics: how old this frame is in the server buffer (ms since ingest) and
+      // whether it came from the live desktopCapturer feed vs the screencapture fallback.
+      // If X-Frame-Age is small but the phone still lags, the delay is capture-side or
+      // render-side, not transport.
+      res.setHeader('X-Frame-Age', String(Date.now() - lastIngestAt))
+      res.setHeader('X-Frame-Live', ingestFresh() ? '1' : '0')
       res.setHeader('Cache-Control', 'no-store')
       res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('Access-Control-Expose-Headers', 'X-Frame-Seq')
+      res.setHeader('Access-Control-Expose-Headers', 'X-Frame-Seq, X-Frame-Age, X-Frame-Live')
       res.end(latestIngestFrame)
       return
     }
@@ -4507,13 +4513,27 @@ app.get('/_capture', (_req, res) => {
   }
   setInterval(pollActive, 1000); pollActive();
 
-  const frameMs = 1000 / TARGET_FPS;
+  // Draw + POST exactly when the decoder hands us a fresh video frame
+  // (requestVideoFrameCallback) — lowest possible latency, no stale re-draws and no
+  // redundant work between frames. Falls back to a fixed-rate timer where rVFC is absent.
   let busy = false;
-  setInterval(async () => {
-    if (!active || busy) return;
-    if (!stream) { await ensureStream(); return; }
-    busy = true; try { await grabAndPost(); } finally { busy = false; }
-  }, frameMs);
+  async function tick() {
+    if (active && stream && video && !busy) {
+      busy = true; try { await grabAndPost(); } finally { busy = false; }
+    }
+  }
+  function pump() {
+    if (video && typeof video.requestVideoFrameCallback === 'function') {
+      const onFrame = () => { tick(); if (video) video.requestVideoFrameCallback(onFrame); };
+      video.requestVideoFrameCallback(onFrame);
+    } else {
+      setInterval(tick, 1000 / TARGET_FPS);
+    }
+  }
+  // Wait until a stream+video exist, then start the per-frame pump once.
+  const waitStart = setInterval(() => {
+    if (video) { clearInterval(waitStart); pump(); }
+  }, 200);
 })();
 </script>
 </body></html>`)
