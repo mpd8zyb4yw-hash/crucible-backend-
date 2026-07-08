@@ -4513,27 +4513,15 @@ app.get('/_capture', (_req, res) => {
   }
   setInterval(pollActive, 1000); pollActive();
 
-  // Draw + POST exactly when the decoder hands us a fresh video frame
-  // (requestVideoFrameCallback) — lowest possible latency, no stale re-draws and no
-  // redundant work between frames. Falls back to a fixed-rate timer where rVFC is absent.
+  // Fixed-rate capture timer. Timers keep firing at full rate in a hidden window
+  // (backgroundThrottling:false), unlike requestVideoFrameCallback which is gated on the
+  // window's compositing cadence and stalls when the window isn't rendered.
+  const frameMs = 1000 / TARGET_FPS;
   let busy = false;
-  async function tick() {
-    if (active && stream && video && !busy) {
-      busy = true; try { await grabAndPost(); } finally { busy = false; }
-    }
-  }
-  function pump() {
-    if (video && typeof video.requestVideoFrameCallback === 'function') {
-      const onFrame = () => { tick(); if (video) video.requestVideoFrameCallback(onFrame); };
-      video.requestVideoFrameCallback(onFrame);
-    } else {
-      setInterval(tick, 1000 / TARGET_FPS);
-    }
-  }
-  // Wait until a stream+video exist, then start the per-frame pump once.
-  const waitStart = setInterval(() => {
-    if (video) { clearInterval(waitStart); pump(); }
-  }, 200);
+  setInterval(async () => {
+    if (!active || busy || !stream) return;
+    busy = true; try { await grabAndPost(); } finally { busy = false; }
+  }, frameMs);
 })();
 </script>
 </body></html>`)

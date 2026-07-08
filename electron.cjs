@@ -72,32 +72,25 @@ function createWindow() {
   mainWindow.loadURL('http://localhost:5173');
 }
 
-// Always-on window that runs the real-time screen-capture pipeline. It loads /_capture
-// (served by the backend), which grabs a live screen MediaStream via getDisplayMedia and
-// POSTs JPEG frames to /api/screen-ingest.
+// Hidden, always-on window that runs the real-time screen-capture pipeline. It loads
+// /_capture (served by the backend), which grabs a live screen MediaStream via
+// getDisplayMedia and POSTs JPEG frames to /api/screen-ingest.
 //
-// CRITICAL: it must genuinely RENDER, or Chromium throttles the <video> element that
-// drives the capture — a `show:false` window delivers video frames seconds late (stale
-// drawImage), which is exactly the multi-second latency we're chasing. So we show it but
-// park it far off-screen and make it non-interactive: the user never sees it, but the
-// compositor keeps the video pipeline running at full rate.
+// backgroundThrottling:false keeps its timers running at full rate while hidden. (An
+// earlier attempt to render it off-screen with show:true made latency *worse* — an
+// off-screen window's compositing/rVFC cadence is throttled harder than a plain
+// hidden window's timers, so we stick with show:false + a fixed-rate capture timer.)
 function createCaptureWindow() {
   captureWindow = new BrowserWindow({
-    x: -4000, y: -4000,
     width: 320,
     height: 240,
-    show: true,
-    skipTaskbar: true,
-    focusable: false,
-    minimizable: false,
-    fullscreenable: false,
+    show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      backgroundThrottling: false,   // keep timers + compositing at full rate off-screen
+      backgroundThrottling: false,
     },
   });
-  captureWindow.setIgnoreMouseEvents(true);
   captureWindow.on('closed', () => { captureWindow = null; });
   captureWindow.loadURL('http://localhost:3001/_capture');
 }
