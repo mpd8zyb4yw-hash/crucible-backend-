@@ -48,6 +48,7 @@ import { startBuilder, replyBuilder, dryRunBuilder, installBuilder, getBuilderSe
 import { startRefine, smokeRefine, applyRefine, getRefineSession, detectRefineRequest } from './src/CrucibleEngine/toolRefiner'
 import { createPairingCode, claimPairingCode, verifyDeviceToken, listDevices, revokeDevice, setDeviceTier, readAudit, appendAudit as appendDeviceAudit, type RemoteDevice, type DeviceTier } from './src/CrucibleEngine/remoteDevices'
 import { listSources as listToolSources, addSource as addToolSource, removeSource as removeToolSource, rebuildIndex as rebuildSourceIndex, loadIndex as loadSourceIndex, searchIndex as searchSourceIndex, importTool as importSourceTool, type SourceCard, type FetchLike } from './src/CrucibleEngine/toolSources'
+import { startDownload, getProgress as getDownloadProgress, listDownloads as listDownloadsManager, pauseDownload, cancelDownload } from './src/CrucibleEngine/modelDownloader'
 import { identifyGoals, loadGoalReport, saveGoalReport } from './src/CrucibleEngine/goalEngine'
 import { metaLearningStatus } from './src/CrucibleEngine/triumvirate'
 import { writeCheckpoint, clearCheckpoint, readCheckpoint, findAllCheckpoints, sweepStaleCheckpoints } from './src/CrucibleEngine/state/checkpoint'
@@ -4817,6 +4818,45 @@ app.get('/api/builder/:id', (req, res) => {
   const s = getBuilderSession(req.params.id)
   if (!s) { res.status(404).json({ error: 'no such builder session' }); return }
   res.json({ session: builderSessionView(s) })
+})
+
+// ── Persistent resumable downloads (model artifacts etc.) ────────────────────
+// Server-owned, so progress survives the app closing or the connection dropping —
+// the client polls GET and re-attaches to live state instead of restarting from 0.
+
+app.post('/api/downloads/start', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  const existing = getDownloadProgress(String(url), String(dest))
+  if (existing?.status === 'complete') { res.json(existing); return }
+  // Fire-and-forget: the transfer runs server-side; the client polls for progress.
+  startDownload(String(url), String(dest), { baseDir: DEVICE_BASE_DIR }).catch(() => {})
+  res.json(getDownloadProgress(String(url), String(dest)) ?? { url, dest, status: 'downloading', downloaded: 0, total: null })
+})
+
+app.get('/api/downloads', (_req, res) => {
+  res.json({ downloads: listDownloadsManager(DEVICE_BASE_DIR) })
+})
+
+app.get('/api/downloads/progress', (req, res) => {
+  const { url, dest } = req.query
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  const p = getDownloadProgress(String(url), String(dest))
+  if (!p) { res.status(404).json({ error: 'no such download' }); return }
+  res.json(p)
+})
+
+app.post('/api/downloads/pause', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  res.json({ paused: pauseDownload(String(url), String(dest)), progress: getDownloadProgress(String(url), String(dest)) })
+})
+
+app.post('/api/downloads/cancel', (req, res) => {
+  const { url, dest } = req.body ?? {}
+  if (!url || !dest) { res.status(400).json({ error: 'url and dest required' }); return }
+  cancelDownload(String(url), String(dest))
+  res.json({ ok: true })
 })
 
 // ── Tool tuning suggestions (design spec §4.1) ───────────────────────────────

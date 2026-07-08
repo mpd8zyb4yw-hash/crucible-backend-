@@ -1354,6 +1354,45 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-07o — Multi-context command fix + persistent resumable downloads
+
+Two user-reported bugs.
+
+**1. "0 contextual understanding" on multi-step commands** — e.g. "open youtube search for
+be.busta play one of the videos" returned a canned "playing one of the videos on youtube."
+Cause: `localIntentRouter.resolvePlayMedia` greedily matched `play` and captured the
+referential phrase "one of the videos" as the literal search query, firing a deterministic
+1-step plan for a 3-step task. Fix: `resolvePlayMedia` now BAILS to the real agent loop (which
+has `search_youtube` + `open_app` and plans with step-to-step context) when (a) another action
+verb precedes "play" (compound command) or (b) the play-subject is referential ("one of the
+videos", "the first one", "it"). High-precision single-intent commands ("play X on youtube",
+"put on some jazz", "play despacito") still resolve locally. Verified: 12-assertion test —
+7 multi-context phrasings bail, 5 single-intent still resolve.
+
+**2. Model download resets to 0 on app close / connection loss** — there was no server-side
+download code at all (the local model runs via an external daemon), so any download's progress
+lived in ephemeral client state and reset. Built `src/CrucibleEngine/modelDownloader.ts` — a
+server-owned resumable manager, same principle as the chat task registry (server work survives
+client disconnect):
+- Bytes stream to `<dest>.part`; the file on disk IS the progress. A `<dest>.part.json` sidecar
+  records url/total/etag.
+- Resume issues `Range: bytes=<have>-` and appends — never restarts from 0. Servers that ignore
+  Range (200 not 206) are detected and the partial truncated safely.
+- Dropped connections retry with exponential backoff, each retry resuming from the current
+  offset. Completion validates size, promotes `.part`→`dest`, cleans the sidecar.
+- `getProgress()` reads straight from disk, so closing/reopening the app re-attaches to live
+  server-side progress instead of resetting.
+- Endpoints: `POST /api/downloads/{start,pause,cancel}`, `GET /api/downloads`,
+  `GET /api/downloads/progress`.
+- Verified: 13-assertion test with a Range-aware local server — interrupt at 700KB/2MB →
+  progress survives a simulated restart (paused, correct offset) → resume continues from the
+  offset (not 0) → byte-identical SHA-256 → artifacts cleaned; plus a repeated-drop convergence
+  case. Live server probe: start→complete→listed end-to-end.
+
+Both fixes are backend-only (server runs via tsx), so no `app/` rebuild was needed. The
+frontend model-download UI (wherever it lives — likely the native app) should call these
+endpoints and poll `GET /api/downloads/progress` instead of holding progress in local state.
+
 ### 2026-07-07n — SHIP THE BUNDLE: commit built `app/` so frontend changes reach the phone
 
 The user reported (twice) that no UI changes appeared on their iPhone, with horizontal
