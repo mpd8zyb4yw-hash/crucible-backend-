@@ -4369,6 +4369,9 @@ let frameSeq = 0
 let lastIngestAt = 0             // epoch ms of the most recent *live* ingest frame
 let lastScreenPullAt = 0         // epoch ms of the most recent phone frame-pull
 let screenViewerCount = 0        // active SSE viewers (legacy path)
+// Diagnostics — which capture path is actually running + how fast.
+let captureError: string | null = null   // last getDisplayMedia error from the capture window
+let liveFrameTimes: number[] = []         // timestamps of recent LIVE ingest frames (fps calc)
 
 const ingestFresh = () => (Date.now() - lastIngestAt) < 2000
 const screenActive = () => screenViewerCount > 0 || (Date.now() - lastScreenPullAt) < 2500
@@ -4376,7 +4379,12 @@ const screenActive = () => screenViewerCount > 0 || (Date.now() - lastScreenPull
 function publishFrame(buf: Buffer, live: boolean) {
   latestIngestFrame = buf
   frameSeq++
-  if (live) lastIngestAt = Date.now()
+  if (live) {
+    lastIngestAt = Date.now()
+    captureError = null
+    liveFrameTimes.push(lastIngestAt)
+    if (liveFrameTimes.length > 40) liveFrameTimes.shift()
+  }
 }
 
 // POST /api/screen-ingest — receive one JPEG frame from the Electron capture window.
@@ -4387,10 +4395,39 @@ app.post('/api/screen-ingest', express.raw({ type: () => true, limit: '20mb' }),
   res.status(204).end()
 })
 
+// POST /api/screen-ingest/report — the capture window reports getDisplayMedia failures
+// here so we can tell "permission denied" apart from "just slow" without guessing.
+app.post('/api/screen-ingest/report', express.json(), (req, res) => {
+  captureError = typeof req.body?.error === 'string' ? req.body.error.slice(0, 300) : null
+  res.status(204).end()
+})
+
 // GET /api/screen-ingest/active — the capture window polls this so it can stop
 // encoding/POSTing frames when no phone is watching (saves CPU + battery).
 app.get('/api/screen-ingest/active', (_req, res) => {
   res.json({ active: screenActive() })
+})
+
+// GET /api/screen-diag — one-glance answer to "why is the stream slow?". Open this on
+// the Mac (http://localhost:3001/api/screen-diag). It reports which capture path is live,
+// the real ingest fps, the current frame size, and any capture error (→ permission).
+app.get('/api/screen-diag', (_req, res) => {
+  const recent = liveFrameTimes.filter(t => Date.now() - t < 1500)
+  const fps = recent.length >= 2
+    ? Math.round((recent.length - 1) * 1000 / (recent[recent.length - 1] - recent[0]))
+    : 0
+  res.json({
+    source: ingestFresh() ? 'desktopCapturer (fast)' : (screenActive() ? 'screencapture fallback (slow ~3fps)' : 'idle — no viewer'),
+    live: ingestFresh(),
+    liveFps: fps,
+    frameBytes: latestIngestFrame?.length ?? 0,
+    frameKB: Math.round((latestIngestFrame?.length ?? 0) / 1024),
+    viewers: screenViewerCount,
+    captureError,
+    hint: captureError
+      ? 'getDisplayMedia failed — almost always macOS Screen-Recording permission. System Settings → Privacy & Security → Screen Recording → enable Crucible, then relaunch.'
+      : (ingestFresh() ? 'Live path active. If still slow, frame size/link is the limit.' : 'On the slow fallback. Check permission, or open the app on a device to start a viewer.'),
+  })
 })
 
 // ── Fallback capturer ─────────────────────────────────────────────────────────
@@ -4401,7 +4438,7 @@ app.get('/api/screen-ingest/active', (_req, res) => {
 {
   const rawFile = '/tmp/crucible_screen_raw.jpg'
   const outFile = '/tmp/crucible_screen_frame.jpg'
-  const cmd = `screencapture -x -t jpg ${rawFile} && sips -Z 1100 ${rawFile} --out ${outFile} -s format jpeg -s formatOptions 45 >/dev/null 2>&1 || cp ${rawFile} ${outFile}`
+  const cmd = `screencapture -x -t jpg ${rawFile} && sips -Z 1024 ${rawFile} --out ${outFile} -s format jpeg -s formatOptions 40 >/dev/null 2>&1 || cp ${rawFile} ${outFile}`
   let capturing = false
   const tick = () => {
     if (!capturing && screenActive() && !ingestFresh()) {
@@ -4466,13 +4503,18 @@ app.get('/_capture', (_req, res) => {
 <body style="margin:0;background:#000">
 <script>
 (async () => {
-  const MAX_W = 1280;        // downscale width — caps bytes/frame for LAN transport
-  const QUALITY = 0.5;       // JPEG quality
+  const MAX_W = 1024;        // downscale width — smaller frame = less transfer latency
+  const QUALITY = 0.45;      // JPEG quality (legible for text at this width)
   const TARGET_FPS = 20;
   const INGEST = 'http://localhost:3001/api/screen-ingest';
   const ACTIVE = 'http://localhost:3001/api/screen-ingest/active';
+  const REPORT = 'http://localhost:3001/api/screen-ingest/report';
 
   let stream = null, video = null, canvas = null, ctx = null;
+
+  function report(err) {
+    try { fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ error: err }) }); } catch (e) {}
+  }
 
   async function ensureStream() {
     if (stream) return true;
@@ -4484,8 +4526,9 @@ app.get('/_capture', (_req, res) => {
       canvas = document.createElement('canvas');
       ctx = canvas.getContext('2d', { alpha: false });
       stream.getVideoTracks()[0].addEventListener('ended', () => { stream = null; });
+      report(null);   // clear any prior error — live path is up
       return true;
-    } catch (e) { stream = null; return false; }
+    } catch (e) { stream = null; report(String(e && e.message || e)); return false; }
   }
 
   function stopStream() {
