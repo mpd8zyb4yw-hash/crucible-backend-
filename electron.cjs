@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, desktopCapturer, session } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const path = require('path');
@@ -11,6 +11,7 @@ app.setName('crucible-local');
 app.setPath('userData', path.join(app.getPath('appData'), 'crucible-local'));
 
 let mainWindow;
+let captureWindow;
 let serverProc;
 let viteProc;
 
@@ -71,9 +72,29 @@ function createWindow() {
   mainWindow.loadURL('http://localhost:5173');
 }
 
+// Hidden, always-on window that runs the real-time screen-capture pipeline. It loads
+// /_capture (served by the backend), which grabs a live screen MediaStream via
+// getDisplayMedia and POSTs JPEG frames to /api/screen-ingest. Kept offscreen and
+// never shown — it exists only to host the capture <script>.
+function createCaptureWindow() {
+  captureWindow = new BrowserWindow({
+    width: 320,
+    height: 240,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      backgroundThrottling: false,   // keep encoding at full rate while hidden
+    },
+  });
+  captureWindow.on('closed', () => { captureWindow = null; });
+  captureWindow.loadURL('http://localhost:3001/_capture');
+}
+
 function killBackend() {
   if (serverProc) { serverProc.kill(); serverProc = null; }
   if (viteProc) { viteProc.kill(); viteProc = null; }
+  if (captureWindow) { captureWindow.close(); captureWindow = null; }
 }
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -85,6 +106,16 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(async () => {
+    // Auto-grant getDisplayMedia to the primary screen — no OS picker dialog. This is
+    // what lets the hidden capture window pull a live screen stream unattended.
+    // (Requires macOS Screen-Recording permission for the app; if that's denied the
+    // request rejects and the server falls back to the screencapture slideshow.)
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+        callback({ video: sources[0], audio: false });
+      }).catch(() => callback({}));
+    }, { useSystemPicker: false });
+
     spawnBackend();
     console.log('[electron] waiting for server and vite...');
     try {
@@ -93,6 +124,7 @@ if (!gotTheLock) {
       await new Promise(r => setTimeout(r, 2500));
       console.log('[electron] launching window');
       createWindow();
+      createCaptureWindow();
     } catch (err) {
       console.error('[electron] startup failed:', err.message);
       app.quit();

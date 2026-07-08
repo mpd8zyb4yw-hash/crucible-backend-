@@ -1346,6 +1346,31 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-08 — Remote Brain: real-time screen capture (kills the ~2fps/multi-second lag)
+
+The Remote Brain screen stream spawned `screencapture` + `sips` **per frame** — two process
+spawns + two disk round-trips, floored at ~400ms/frame (~2fps). On a slow LAN the big base64
+frames also queued into multi-second latency. `ffmpeg` and the `ws` npm package are both absent,
+so the only zero-dep real-time path is Chromium's built-in `desktopCapturer`/`getDisplayMedia`.
+
+Implemented (no new deps):
+- **`electron.cjs`** — `setDisplayMediaRequestHandler` auto-grants the primary screen (no OS
+  picker), and a hidden always-on capture `BrowserWindow` (`backgroundThrottling:false`) loads
+  `/_capture`.
+- **`server.ts`** — `/_capture` page pulls a live 20fps `MediaStream`, draws to a downscaled
+  (1280px, q0.5) canvas, and POSTs JPEG frames to new `POST /api/screen-ingest`. Server keeps only
+  the newest frame in memory and relays it to phones over the **existing SSE transport** (client
+  in `App.tsx` untouched — it was already optimal). Relay dedups by sequence and honours socket
+  backpressure, so latency is bounded to one frame and can never accumulate. Capture is gated on
+  active viewers via `/api/screen-ingest/active`.
+- **Fallback preserved** — if ingest goes stale (>2s, e.g. Screen-Recording permission denied),
+  the SSE handler reverts to the old `screencapture` loop, so behavior is never worse than before.
+
+Verified: relay/dedup/backpressure/staleness algorithm passes a standalone Node simulation; Electron
+syntax OK. **On-device gap (cannot verify from Linux CI):** macOS Screen-Recording permission grant
+for the Crucible app, and actual fps/latency over the user's network. If still laggy after relaunch,
+check System Settings → Privacy → Screen Recording.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

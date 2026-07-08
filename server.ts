@@ -4345,6 +4345,113 @@ app.post('/api/corpus/ingest-document', async (req, res) => {
 
 // ── Step 9: Remote Brain ──────────────────────────────────────────────────────
 
+// ── Real-time screen ingest (Electron desktopCapturer) ────────────────────────
+// The per-frame `screencapture` + `sips` pipeline below is floored at ~400ms/frame
+// (~2fps) — two process spawns + two disk round-trips per frame. That's a slideshow
+// by construction, and on a slow LAN the big frames queue into multi-second lag.
+//
+// The real fix is a live capture stream. ffmpeg isn't installed and `screencapture`
+// has no streaming mode, but this is an Electron app, so Chromium's built-in
+// desktopCapturer/getDisplayMedia gives a hardware-accelerated 30fps MediaStream with
+// zero external deps. A hidden Electron capture window (see /_capture below) pulls that
+// stream, JPEG-encodes each frame off a canvas, and POSTs it here. We keep only the
+// newest frame in memory and relay it to phones over the existing SSE transport.
+//
+// If ingest stops (screen-recording permission denied, capture window crashed), the
+// SSE handler falls back to the old screencapture loop, so behavior is never worse
+// than before — it just degrades from video to a slideshow.
+let latestIngestFrame: Buffer | null = null
+let latestIngestSeq = 0          // bumps on every new ingest frame
+let lastIngestAt = 0             // epoch ms of the most recent ingest frame
+let screenViewerCount = 0        // active SSE viewers — gates capture to save CPU
+
+const ingestFresh = () => latestIngestFrame != null && (Date.now() - lastIngestAt) < 2000
+
+// POST /api/screen-ingest — receive one JPEG frame from the Electron capture window.
+// LAN/localhost only (router ACL + it's the Mac posting to itself). Raw body, no auth.
+app.post('/api/screen-ingest', express.raw({ type: () => true, limit: '20mb' }), (req, res) => {
+  const body = req.body as Buffer
+  if (Buffer.isBuffer(body) && body.length > 0) {
+    latestIngestFrame = body
+    latestIngestSeq++
+    lastIngestAt = Date.now()
+  }
+  res.status(204).end()
+})
+
+// GET /api/screen-ingest/active — the capture window polls this so it can stop
+// encoding/POSTing frames when no phone is watching (saves CPU + battery).
+app.get('/api/screen-ingest/active', (_req, res) => {
+  res.json({ active: screenViewerCount > 0 })
+})
+
+// GET /_capture — the page loaded by the hidden Electron capture window. It grabs a
+// live screen MediaStream via getDisplayMedia (auto-granted by the main process's
+// display-media handler, no OS picker), draws each frame to a downscaled canvas, and
+// POSTs the JPEG to /api/screen-ingest. Only runs while a phone is watching.
+app.get('/_capture', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>capture</title></head>
+<body style="margin:0;background:#000">
+<script>
+(async () => {
+  const MAX_W = 1280;        // downscale width — caps bytes/frame for LAN transport
+  const QUALITY = 0.5;       // JPEG quality
+  const TARGET_FPS = 20;
+  const INGEST = 'http://localhost:3001/api/screen-ingest';
+  const ACTIVE = 'http://localhost:3001/api/screen-ingest/active';
+
+  let stream = null, video = null, canvas = null, ctx = null;
+
+  async function ensureStream() {
+    if (stream) return true;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: TARGET_FPS }, audio: false });
+      video = document.createElement('video');
+      video.srcObject = stream; video.muted = true;
+      await video.play();
+      canvas = document.createElement('canvas');
+      ctx = canvas.getContext('2d', { alpha: false });
+      stream.getVideoTracks()[0].addEventListener('ended', () => { stream = null; });
+      return true;
+    } catch (e) { stream = null; return false; }
+  }
+
+  function stopStream() {
+    if (stream) { for (const t of stream.getTracks()) t.stop(); stream = null; }
+  }
+
+  async function grabAndPost() {
+    if (!video || !video.videoWidth) return;
+    const scale = Math.min(1, MAX_W / video.videoWidth);
+    const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    ctx.drawImage(video, 0, 0, w, h);
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', QUALITY));
+    if (!blob) return;
+    try { await fetch(INGEST, { method: 'POST', body: blob, headers: { 'Content-Type': 'image/jpeg' } }); } catch (e) {}
+  }
+
+  let active = false;
+  async function pollActive() {
+    try { const r = await fetch(ACTIVE); active = (await r.json()).active; } catch (e) { active = false; }
+    if (active) { if (await ensureStream()) {} } else { stopStream(); }
+  }
+  setInterval(pollActive, 1000); pollActive();
+
+  const frameMs = 1000 / TARGET_FPS;
+  let busy = false;
+  setInterval(async () => {
+    if (!active || busy) return;
+    if (!stream) { await ensureStream(); return; }
+    busy = true; try { await grabAndPost(); } finally { busy = false; }
+  }, frameMs);
+})();
+</script>
+</body></html>`)
+})
+
 // GET /api/screen-stream — SSE-based screen capture for Remote Brain mode.
 //
 // Why SSE instead of MJPEG multipart:
@@ -4381,6 +4488,7 @@ app.get('/api/screen-stream', (req, res) => {
 
   let alive = true
   let framesSent = 0
+  screenViewerCount++
   // SSE keep-alive ping every 20s — prevents iOS Safari from closing an idle connection
   // while the user is typing and no frames are in-flight.
   const keepalive = setInterval(() => {
@@ -4390,29 +4498,51 @@ app.get('/api/screen-stream', (req, res) => {
 
   req.on('close', () => {
     alive = false
+    screenViewerCount = Math.max(0, screenViewerCount - 1)
     clearInterval(keepalive)
     debugBus.emit('model', 'screen_stream_stop', { framesSent }, { severity: 'info' })
   })
 
+  // Send a single JPEG buffer down the SSE channel, honouring backpressure. Returns
+  // false if the socket is backed up (caller should skip until it drains — this is
+  // what bounds latency: we never queue stale frames behind a slow network).
+  function sendFrame(frame: Buffer): boolean {
+    if ((res as any).writableNeedDrain || (res.socket && !res.socket.writable)) return false
+    try {
+      res.write(`data: ${frame.toString('base64')}\n\n`)
+      ;(res as any).flush?.()
+      framesSent++
+      return true
+    } catch { alive = false; return false }
+  }
+
+  // ── Real-time path: relay ingest frames from the Electron capture window ──────
+  // Poll the shared latest-frame buffer at a high rate and forward whenever a new
+  // frame has arrived (dedup by sequence number). This is push-latency-bound: a frame
+  // captured on the Mac reaches the phone within one poll tick + one network RTT.
+  let lastRelayedSeq = -1
+  const RELAY_TICK_MS = 15   // ~66Hz poll; actual fps is capped by the capture window
+  const relay = setInterval(() => {
+    if (!alive || res.writableEnded) { clearInterval(relay); return }
+    if (!ingestFresh()) return                 // no live feed → screencapture fallback drives
+    if (latestIngestSeq === lastRelayedSeq) return
+    if (latestIngestFrame && sendFrame(latestIngestFrame)) lastRelayedSeq = latestIngestSeq
+  }, RELAY_TICK_MS)
+  req.on('close', () => clearInterval(relay))
+
+  // ── Fallback path: screencapture loop, only while no live ingest feed is flowing.
+  // Gives phones the old ~2fps slideshow if desktopCapturer can't run (e.g. macOS
+  // Screen-Recording permission not granted for the app).
   function captureFrame() {
     if (!alive || res.writableEnded) return
+    if (ingestFresh()) { setTimeout(captureFrame, 500); return }  // real feed live → idle
     exec(captureCmd, { timeout: 5000 }, (err) => {
       if (!alive || res.writableEnded) return
       if (err) { setTimeout(captureFrame, FRAME_INTERVAL_MS); return }
       fs.readFile(outFile, (readErr, frame) => {
         if (!alive || res.writableEnded) return
         if (readErr || !frame?.length) { setTimeout(captureFrame, FRAME_INTERVAL_MS); return }
-        // If the socket buffer is backed up, drop this frame and try again next tick.
-        // This prevents a growing queue of stale frames causing multi-second delay.
-        if ((res as any).writableNeedDrain || (res.socket && !res.socket.writable)) {
-          setTimeout(captureFrame, FRAME_INTERVAL_MS)
-          return
-        }
-        try {
-          res.write(`data: ${frame.toString('base64')}\n\n`)
-          ;(res as any).flush?.()
-          framesSent++
-        } catch { alive = false; return }
+        if (!ingestFresh()) sendFrame(frame)
         setTimeout(captureFrame, FRAME_INTERVAL_MS)
       })
     })
