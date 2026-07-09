@@ -1566,8 +1566,23 @@ obvious next step, left as a documented hook). Pure `benchmarks.ts`, no `server.
 `test-benchmarks.ts` (10/10): drop detection, min-sample floor, improvement/flat = no regression, and
 persistence to `benchmark-runs.json` across a degrade→recover sequence.
 
-**Session test coverage:** `test-selfpatcher.ts` 35 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
-9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **75 deterministic assertions**, all green,
+**Follow-on — wired code EXECUTION into the coding ground-truth signal (the north-star mechanism).**
+`domainVerify` has no `coding` case, so coding answers were reaching the learning loop with **no**
+ground-truth verdict — even though the pipeline already sandbox-executes the answer's first code block
+(the "trace" path via `/api/verify`). That `passed` boolean only fed a polish hint and a debug event,
+then vanished. Now captured (`codeExecVerdict`) and folded into `groundTruthVerified` for the request:
+if the answer's code actually RAN, that pass/fail is the authoritative coding signal and overrides the
+(absent) domainVerify verdict. So the self-patcher and autoImprove now learn coding-synthesis prompts
+from whether the code *executed*, not from a model's opinion of it — the doctrine's "weak free model +
+ground-truth self-refinement → good output" thesis, closed for the promptType that matters most for
+on-device agentic coding. This is pure learning-signal plumbing in the request region — it reads the
+existing trace verdict, it does not build a code executor (that sandbox/verify path is the parallel
+session's lane). `test-selfpatcher.ts` extended to **38/38** with the explicit scenario: high-`topScore`
+coding answers that failed execution drive a coding *synthesis* patch (not fast-path), and the learned
+refinement applies to the code-synthesis prompt.
+
+**Session test coverage:** `test-selfpatcher.ts` 38 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
+9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **78 deterministic assertions**, all green,
 all no-network.
 
 **Verified-but-unchanged (for the other model's orientation):** the preference model is fully wired

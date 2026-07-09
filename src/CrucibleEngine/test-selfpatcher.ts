@@ -221,6 +221,23 @@ async function main() {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 
+  // ── 10. North-star scenario: coding answers that the ensemble scored high but
+  //    that FAILED to execute (groundTruthVerified:false from the sandbox trace)
+  //    must drive a coding synthesis patch — execution failure teaches the loop.
+  {
+    const dir = tmp()
+    const h: any[] = []
+    // Full-pipeline coding entries (no `path`): fluent, topScore 0.80, but the code
+    // didn't run — exactly what server.ts now records from codeExecVerdict.
+    for (let i = 0; i < 16; i++) h.push({ ts: now - (16 - i) * 1000, promptType: 'coding', topScore: 0.80, groundTruthVerified: i < 10 ? false : true })
+    await runSelfPatcher(dir, [], h, ['coding'], approveIf(/coding/))
+    const p = loadPatches(dir)
+    ok(p.some(x => x.stage === 'stage5_synthesis' && x.promptType === 'coding' && x.status === 'active'), 'high-topScore coding answers that failed execution drive a coding synthesis patch')
+    ok(!p.some(x => x.stage === 'fastpath_answer'), 'full-pipeline execution failures target synthesis, not the fast path')
+    ok(activePatchText(dir, 'coding', 'stage5_synthesis').length > 0, 'the learned coding refinement applies to the code-synthesis prompt')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+
   console.log(`\nself-patcher regression: ${pass} passed, ${fail} failed`)
   process.exit(fail ? 1 : 0)
 }

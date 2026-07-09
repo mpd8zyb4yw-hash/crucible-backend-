@@ -3385,6 +3385,11 @@ ${worldCtx}`
     })() : Promise.resolve()
 
     let traceBlock = ''
+    // Sandbox execution verdict of the answer's first code block. For coding tasks
+    // this is the strongest possible ground truth ("does it run?") — domainVerify has
+    // no coding case — so it feeds groundTruthVerified below and teaches the learning
+    // loop to write better coding prompts from actual execution outcomes.
+    let codeExecVerdict: boolean | null = null
     const tracePromise = shouldRunTrace(synthesisText, promptType) ? (async () => {
       try {
         const cb = extractFirstCodeBlock(synthesisText)
@@ -3401,6 +3406,7 @@ ${worldCtx}`
               exitCode: vd.passed ? 0 : 1, runtimeMs: vd.runtimeMs ?? 0,
               language: cb.language, passed: vd.passed ?? false,
             }, cb.code)
+            codeExecVerdict = vd.passed ?? false
             debugBus.emit('pipeline', 'execution_trace_injected', { language: cb.language, passed: vd.passed }, { severity: 'info', requestId })
           }
         }
@@ -3444,6 +3450,12 @@ ${worldCtx}`
 
     // Await all three concurrent branches before polish
     await Promise.all([cfPromise, tracePromise, hypPromise])
+
+    // Coding ground truth: if we actually executed the answer's code block, that
+    // pass/fail is the authoritative signal for a coding task and overrides any
+    // (absent) domainVerify verdict — so the self-patcher/autoImprove learn coding
+    // prompts from whether the code RAN, not from a model's opinion of it.
+    if (codeExecVerdict !== null) groundTruthVerified = codeExecVerdict
 
     // ── Stage 5b — deterministic + model polish (the "gold out" half) ───────
     // Polish runs silently; the final polished text replaces the streamed draft.
