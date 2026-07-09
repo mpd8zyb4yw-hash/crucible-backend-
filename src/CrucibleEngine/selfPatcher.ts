@@ -1,8 +1,15 @@
-// Pipeline self-patcher (Track B1) — the system reads its own debug bus history,
-// identifies the stage that most frequently precedes low-score synthesis, and
-// proposes a prompt config patch. Proposals go through the triumvirate before
-// being written to .crucible/pipeline-patches.json, which server.ts loads at
-// startup to override stage prompts.
+// Pipeline self-patcher (Track B1) — the system reads its own per-request quality
+// history, identifies a promptType whose synthesised answers are consistently
+// scoring low, and proposes a synthesis-prompt refinement. Proposals go through the
+// triumvirate; approved patches are written to .crucible/pipeline-patches.json and
+// applied to the live Stage 5 synthesis prompt via activePatchText(). A patch whose
+// promptType trend degrades after it goes active is auto-reverted.
+//
+// This is the compounding loop: the pipeline's OWN scoring (topScore per request —
+// the max model score the ensemble produced, already computed and persisted) is the
+// ground-truth signal, not a separate model asked "is this good?". Weak outcomes on a
+// promptType become corrective pressure on that promptType's synthesis prompt, and a
+// refinement that fails to help is rolled back — never a premium model.
 
 import fs from 'fs'
 import path from 'path'
@@ -14,8 +21,10 @@ export interface PipelinePatch {
   promptType: string
   problem: string     // what failure mode this addresses
   patch: string       // the new prompt text to apply
-  status: 'pending' | 'approved' | 'rejected' | 'active'
+  status: 'pending' | 'approved' | 'rejected' | 'active' | 'reverted'
   approvedAt?: number
+  revertedAt?: number
+  revertReason?: string
 }
 
 const patchFile = (dir: string) => path.join(dir, '.crucible', 'pipeline-patches.json')
@@ -27,6 +36,7 @@ export function loadPatches(dir: string): PipelinePatch[] {
 export function savePatches(dir: string, patches: PipelinePatch[]) {
   fs.mkdirSync(path.dirname(patchFile(dir)), { recursive: true })
   fs.writeFileSync(patchFile(dir), JSON.stringify(patches, null, 2))
+  _activeCache = null  // invalidate the hot-path cache on any write
 }
 
 export function getActivePatches(dir: string): PipelinePatch[] {
@@ -40,67 +50,111 @@ export function approvePatch(dir: string, id: string): void {
   savePatches(dir, patches)
 }
 
-// Analyse debug history and quality data to identify the weakest pipeline stage.
-// Returns a proposed patch or null if no clear improvement target.
+// ── Hot-path application ──────────────────────────────────────────────────────
+// Called once per chat request at synthesis-prompt construction. Cached by file
+// mtime so the common case (no patches, or unchanged patches) never re-parses.
+let _activeCache: { dir: string; mtimeMs: number; active: PipelinePatch[] } | null = null
+
+function loadActive(dir: string): PipelinePatch[] {
+  try {
+    const st = fs.statSync(patchFile(dir))
+    if (_activeCache && _activeCache.dir === dir && _activeCache.mtimeMs === st.mtimeMs) {
+      return _activeCache.active
+    }
+    const active = (JSON.parse(fs.readFileSync(patchFile(dir), 'utf8')) as PipelinePatch[])
+      .filter(p => p.status === 'active')
+    _activeCache = { dir, mtimeMs: st.mtimeMs, active }
+    return active
+  } catch { return [] }
+}
+
+// Returns the concatenated refinement text for active patches matching this
+// promptType + stage, bounded so a runaway patch can't blow the context budget.
+// Empty string when nothing applies (the overwhelming common case) — a safe no-op.
+export function activePatchText(dir: string, promptType: string, stage: string): string {
+  const hits = loadActive(dir).filter(p => p.stage === stage && p.promptType === promptType)
+  if (!hits.length) return ''
+  return hits.map(p => p.patch).join('\n\n').slice(0, 1200)
+}
+
+// ── Proposal ──────────────────────────────────────────────────────────────────
+// Ground-truth score for a history entry, tolerant of the several shapes the
+// codebase has used (topScore is what the live pipeline actually persists today).
+function scoreOf(q: any): number | null {
+  const s = q?.compositeScore ?? q?.score ?? q?.topScore
+  return typeof s === 'number' && isFinite(s) ? s : null
+}
+
+const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0
+
+// Analyse quality history for one promptType and, if its recent synthesised
+// answers are consistently scoring low, propose a synthesis-prompt refinement.
+// Returns null when there isn't enough signal or the promptType is healthy.
 export function analyseAndPropose(
-  debugHistory: any[],
+  _debugHistory: any[],
   qualityHistory: any[],
   promptType: string
 ): Omit<PipelinePatch, 'id' | 'ts' | 'status'> | null {
-  // Count events by stage preceding low-quality outcomes
-  const lowScoreRequests = new Set(
-    qualityHistory
-      .filter(q => (q.compositeScore ?? q.score ?? 1) < 0.55)
-      .slice(-100)
-      .map(q => q.requestId)
-      .filter(Boolean)
-  )
+  const forType = qualityHistory.filter(q => q?.promptType === promptType && scoreOf(q) !== null)
+  const recent = forType.slice(-40)
+  if (recent.length < 8) return null   // not enough data to trust the signal
 
-  if (lowScoreRequests.size < 5) return null  // not enough data
+  const scores = recent.map(q => scoreOf(q) as number)
+  const low = scores.filter(s => s < 0.55)
+  const lowRate = low.length / recent.length
+  // Require both an absolute floor of failures and a meaningful rate, so a couple
+  // of hard prompts don't trigger a patch on an otherwise-healthy type.
+  if (low.length < 4 || lowRate < 0.25) return null
 
-  // Count stage events that appear in low-score request chains
-  const stageCounts: Record<string, number> = {}
-  for (const event of debugHistory) {
-    if (!lowScoreRequests.has(event.requestId)) continue
-    if (event.category === 'pipeline' && event.type?.startsWith('stage')) {
-      const key = `${event.data?.stage}_${event.data?.status}`
-      stageCounts[key] = (stageCounts[key] ?? 0) + 1
-    }
+  return {
+    stage: 'stage5_synthesis',
+    promptType,
+    problem: `${promptType}: ${low.length}/${recent.length} recent answers scored below 0.55 (avg ${avg(scores).toFixed(2)})`,
+    patch:
+      `For ${promptType} questions specifically: before finalising, restate the exact thing the ` +
+      `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
+      `extra. Lead with the direct answer, then the reasoning. If the source responses disagree on a ` +
+      `key fact, resolve it explicitly rather than averaging or hedging. Prefer a correct, complete, ` +
+      `verifiable answer over a fluent one.`,
   }
-
-  // Find the stage with most failures
-  const sorted = Object.entries(stageCounts).sort((a, b) => b[1] - a[1])
-  if (!sorted.length) return null
-
-  const [worstKey, count] = sorted[0]
-  const [stage] = worstKey.split('_')
-
-  // Only propose patches for synthesis and critique stages (most impactful)
-  const stageNum = parseInt(stage)
-  if (![3, 5].includes(stageNum)) return null
-
-  if (stageNum === 3) {
-    return {
-      stage: 'stage3_critique',
-      promptType,
-      problem: `Stage 3 critique appeared in ${count} low-score chains for ${promptType} queries`,
-      patch: `When critiquing a ${promptType} response, focus specifically on: (1) factual accuracy of key claims, (2) completeness relative to the question, (3) logical consistency. Be concrete — quote the specific line that is problematic.`,
-    }
-  }
-
-  if (stageNum === 5) {
-    return {
-      stage: 'stage5_synthesis',
-      promptType,
-      problem: `Stage 5 synthesis appeared in ${count} low-score chains for ${promptType} queries`,
-      patch: `When synthesising ${promptType} responses, prioritise: leading with the direct answer, then supporting evidence, then caveats. Never lead with caveats. If models disagree on a key fact, name both positions and indicate which has stronger evidence.`,
-    }
-  }
-
-  return null
 }
 
-// Run the full analyse-propose-submit cycle. callTriumvirate injected from server.ts.
+// ── Rollback ────────────────────────────────────────────────────────────────
+// Review every active patch against outcomes recorded AFTER it went live. If a
+// patch's promptType trend degraded (recent half worse than earlier half) or sits
+// below a hard floor, revert it. This is the safety half of the loop: a refinement
+// that doesn't demonstrably help is removed, so the system can't drift downward.
+export function reviewActivePatches(dir: string, qualityHistory: any[]): string[] {
+  const patches = loadPatches(dir)
+  const reverted: string[] = []
+  let changed = false
+
+  for (const p of patches) {
+    if (p.status !== 'active' || !p.approvedAt) continue
+    const after = qualityHistory
+      .filter(q => q?.promptType === p.promptType && typeof q?.ts === 'number' && q.ts > p.approvedAt!)
+      .map(scoreOf)
+      .filter((s): s is number => s !== null)
+    if (after.length < 6) continue   // give the patch a fair sample before judging
+
+    const half = Math.floor(after.length / 2)
+    const earlier = avg(after.slice(0, half))
+    const recent = avg(after.slice(half))
+    if (recent < earlier - 0.05 || recent < 0.45) {
+      p.status = 'reverted'
+      p.revertedAt = Date.now()
+      p.revertReason = `post-patch ${p.promptType} trend ${earlier.toFixed(2)}→${recent.toFixed(2)} over ${after.length} outcomes`
+      changed = true
+      reverted.push(p.id)
+      console.log(`[SelfPatcher] REVERTED ${p.id} — ${p.revertReason}`)
+    }
+  }
+
+  if (changed) savePatches(dir, patches)
+  return reverted
+}
+
+// Run the full review-analyse-propose-submit cycle. callTriumvirate injected from server.ts.
 export async function runSelfPatcher(
   dir: string,
   debugHistory: any[],
@@ -108,12 +162,21 @@ export async function runSelfPatcher(
   promptTypes: string[],
   callTriumvirate: (proposal: string) => Promise<{ approved: boolean; reason: string }>
 ): Promise<void> {
+  // Safety half first: retire any active patch that hasn't earned its place.
+  reviewActivePatches(dir, qualityHistory)
+
   const patches = loadPatches(dir)
-  const existingProblems = new Set(patches.map(p => p.problem))
+  // Dedupe by (stage, promptType) across everything still on the books — don't
+  // re-propose something already pending/active, and don't thrash on one we reverted.
+  const existingKeys = new Set(
+    patches
+      .filter(p => p.status === 'pending' || p.status === 'active' || p.status === 'reverted')
+      .map(p => `${p.stage}|${p.promptType}`)
+  )
 
   for (const pt of promptTypes) {
     const proposal = analyseAndPropose(debugHistory, qualityHistory, pt)
-    if (!proposal || existingProblems.has(proposal.problem)) continue
+    if (!proposal || existingKeys.has(`${proposal.stage}|${proposal.promptType}`)) continue
 
     console.log(`[SelfPatcher] Proposing patch for ${pt} ${proposal.stage}: ${proposal.problem}`)
     try {
@@ -128,7 +191,8 @@ export async function runSelfPatcher(
         ...(approved ? { approvedAt: Date.now() } : {}),
       }
       patches.push(patch)
-      console.log(`[SelfPatcher] Patch ${approved ? 'APPROVED' : 'REJECTED'}: ${reason}`)
+      existingKeys.add(`${proposal.stage}|${proposal.promptType}`)
+      console.log(`[SelfPatcher] Patch ${approved ? 'APPROVED (active)' : 'REJECTED'}: ${reason}`)
     } catch (e: any) {
       console.warn('[SelfPatcher] Triumvirate call failed:', e.message)
     }

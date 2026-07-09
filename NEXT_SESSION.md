@@ -77,6 +77,15 @@ same as everywhere else in this file).
 
 ## PRIORITY 1 — Close the Learning Loop (The Compounding Gap)
 
+**[RESOLVED 2026-07-09 — see ROADMAP CHANGE LOG.]** The self-patcher was inert on two counts,
+both grep-confirmed: proposals never fired (`analyseAndPropose` filtered on `compositeScore`/
+`requestId`, but the history file it's fed only has `topScore`/`promptType`/`ts`), and approved
+patches never applied (`getActivePatches()` had zero callers). Now closed: proposals score off the
+real `topScore` signal per promptType; `activePatchText()` folds approved Stage-5 refinements into
+the live synthesis prompt; `reviewActivePatches()` auto-reverts a patch whose promptType trend
+degrades. Verified end-to-end at runtime (11/11). Original write-up kept below for context — the
+"verify it's actually wired/firing" ask is now answered: it wasn't, and now is.
+
 **The problem:**
 Crucible has all the pieces of a self-improving system — genealogy attribution, specialization
 memory, quality predictor, triumvirate governance, ANIMA truth store, uncertainty surface — but

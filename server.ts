@@ -132,7 +132,7 @@ import { loadBenchmarks, runBenchmarkSuite, loadRuns } from './src/CrucibleEngin
 import { domainVerify } from './src/CrucibleEngine/domainVerifiers'
 import { assessCollabMode, buildClarifyResponse } from './src/CrucibleEngine/collaborationGradient'
 import { recordRoundContributions, evaluateRoster, getModelsReadyForReprobe, promoteFromBench } from './src/CrucibleEngine/rosterRotation'
-import { runSelfPatcher, loadPatches } from './src/CrucibleEngine/selfPatcher'
+import { runSelfPatcher, loadPatches, activePatchText } from './src/CrucibleEngine/selfPatcher'
 import { buildFailureTaxonomy, loadTaxonomy } from './src/CrucibleEngine/failureTaxonomy'
 import { recordRound as recordStageWeightRound, getStageWeightSummary, getStageMultipliers } from './src/CrucibleEngine/stageWeightLearner'
 import { getForcedModels, applyForcedSlots, recordPipelineRun, recordForcedCall } from './src/CrucibleEngine/specializationForcing'
@@ -2763,12 +2763,22 @@ ${worldCtx}`
   // the final synthesis input set is exactly what we speculated on (stragglers dropped
   // or rolled back); otherwise we DISCARD it and synthesise normally. The wasted call
   // costs nothing on the free tier; the win is hiding synthesis latency behind Stage 1.
-  const synthSystemContent =
+  let synthSystemContent =
     mode === 'seeker'
       ? 'You are the synthesis layer of an adversarial AI pipeline. You have attack analyses from multiple models. Your job: produce a ranked vulnerability report. Lead with the most critical finding. Be precise, not exhaustive. Format: numbered list, most critical first. Plain text only — never use emojis or decorative pictographs.'
       : mode === 'code'
       ? 'You are the synthesis layer of a multi-model AI pipeline specialising in code. You have revised responses from different models. Your job: produce ONE definitive, working code solution. Prefer correctness over brevity. Include all necessary code. ALWAYS put the code inside a single fenced code block with the correct language tag (```language … ```) — this is required, not optional. Explain key decisions briefly in prose after the code block. Plain text only — never use emojis or decorative pictographs.'
       : 'You are the synthesis layer of a multi-model AI debate pipeline. You have revised responses from different models. Your job: produce ONE definitive, high-quality answer. Combine the strongest elements. Eliminate redundancy. Resolve contradictions using best reasoning. Write as a single coherent response, not a comparison. Write in natural prose — never wrap the answer in code blocks, quotation marks, or a variable assignment unless the user explicitly asked for code. Plain text only — never use emojis or decorative pictographs.'
+
+  // Self-patcher application seam (Track B1) — fold in any triumvirate-approved,
+  // still-active synthesis refinement the system proposed for THIS promptType from
+  // its own low-scoring outcomes. Empty (a no-op) unless a patch is live. This is
+  // the point where the self-improvement loop actually closes: without it, patches
+  // were proposed, approved, and persisted but never changed a single prompt.
+  const learnedSynthPatch = activePatchText(process.cwd(), promptType, 'stage5_synthesis')
+  if (learnedSynthPatch) {
+    synthSystemContent += `\n\nLEARNED REFINEMENT (derived by this system from its own verified low-score outcomes on ${promptType} — apply it):\n${learnedSynthPatch}`
+  }
 
   const { normalizeOutput: normalizeForSynth } = await import('./src/CrucibleEngine/normalize')
   const distillationCtx = getDistillationContext(process.cwd(), promptType, 3)

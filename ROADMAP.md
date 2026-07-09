@@ -1346,6 +1346,48 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-09 — Closed the self-improvement loop (self-patcher was doubly inert)
+
+Took NEXT_SESSION.md Priority 1 ("Close the Learning Loop") at its word — *verify, never
+guess* — and found the self-patcher was documented `[x]` but **completely inert on two counts**,
+both confirmed by grep before touching anything:
+
+1. **Proposals could never fire.** `runSelfPatcher` is fed `history-default.json`, whose entries
+   are `{ ts, query, promptType, models, synthesis, topScore, … }` (server.ts ~L3863). But
+   `analyseAndPropose` filtered on `(q.compositeScore ?? q.score ?? 1) < 0.55` and joined debug
+   events by `q.requestId` — **neither field exists** in that file. So the low-score set was always
+   empty and the function returned `null` every run. The system never proposed a single patch.
+2. **Approved patches could never apply.** `getActivePatches()` had **zero callers** in the whole
+   repo (its own definition was its only occurrence). Patches were proposed → triumvirate-approved
+   → written to `.crucible/pipeline-patches.json` → and then read by *nothing*. The module header's
+   claim that "server.ts loads at startup to override stage prompts" was false.
+
+Fix — the loop now closes, grounded in the pipeline's **own** per-request score, not a fresh
+model opinion:
+
+- **Proposal** (`selfPatcher.ts`): `analyseAndPropose` now scores off `topScore` (the max ensemble
+  score the pipeline already computes and persists) via a shape-tolerant `scoreOf()`, keyed per
+  promptType — propose a Stage-5 synthesis refinement when a promptType's recent answers are
+  consistently low (≥4 lows and ≥25% rate over the last ≥8). Dropped the unusable requestId/debug
+  join.
+- **Application** (`server.ts` synthesis seam ~L2766): new `activePatchText(dir, promptType,
+  'stage5_synthesis')` (mtime-cached, bounded to 1200 chars) folds any active, triumvirate-approved
+  refinement for that promptType into `synthSystemContent` — so it reaches **both** the speculative
+  and the real synthesis call. This is the line that was missing; without it everything upstream
+  was theater.
+- **Rollback** (`selfPatcher.ts`): `reviewActivePatches` runs at the top of every cycle and reverts
+  any active patch whose post-approval `promptType` trend degrades (recent half worse than earlier
+  by >0.05, or below a 0.45 floor, over ≥6 outcomes). A reverted stage+promptType is not
+  re-proposed, so no thrash. New `reverted` status + `revertReason` surface in
+  `GET /api/self-patcher/patches`.
+
+Verified at runtime (no network) with an 11-assertion end-to-end harness over the real
+`topScore` history shape: propose→approve→**apply**→(degrade)→**revert**→no-reproposal all pass,
+and healthy promptTypes/other stages get nothing (no bleed). This is the doctrine's own thesis at
+the *architecture* level — the system's ground-truth outcomes drive the system's own refinement,
+and a refinement that doesn't help is removed — a distinct lane from single-request code
+certification.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
