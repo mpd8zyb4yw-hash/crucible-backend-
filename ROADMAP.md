@@ -1417,6 +1417,17 @@ but was not live-exercised in this environment — no bootable server. Confirm l
 simple query whose first draft is verifiably wrong and checking `groundTruthVerified:false` lands in
 `history-default.json`.)
 
+**Follow-on — regression net for the loop.** Because the self-patcher now *auto-applies* synthesis
+refinements, a silent regression in its decision logic would only surface as degraded answers. Added
+`src/CrucibleEngine/test-selfpatcher.ts` (run: `npx tsx src/CrucibleEngine/test-selfpatcher.ts`) — a
+deterministic, no-network, no-server harness (stub triumvirate + temp dirs + the real persisted
+history shapes) pinning the invariants that make the loop safe to run unattended: proposal fires off
+`topScore` (field-mismatch guard), an active patch actually applies scoped to its type+stage, ground
+truth outranks `topScore`, fast-path verifier-lows count while clean nulls are ignored, idempotence,
+and auto-rollback → stops-applying → no-reproposal. **14/14.** Deliberately imports only
+`selfPatcher.ts` — touches no `server.ts` / VGR / foreground-gate code, so it can't cross-build with
+the parallel session.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
