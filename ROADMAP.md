@@ -1428,6 +1428,26 @@ and auto-rollback → stops-applying → no-reproposal. **14/14.** Deliberately 
 `selfPatcher.ts` — touches no `server.ts` / VGR / foreground-gate code, so it can't cross-build with
 the parallel session.
 
+**Follow-on — full early-exit coverage via one tested helper.** The simple-tier write was the first
+of *seven* early-exit paths that answer and `return` before the full pipeline's history write, so
+their answers were invisible to the loop. Rather than duplicate the write seven times, extracted it
+into `src/CrucibleEngine/loopSignal.ts` (`recordFastPathOutcome` + `historyFileFor`) and called it at
+every terminal early-exit: the three ensemble-off on-device paths (`local_only_corpus` /
+`_ensemble` / `_synth`), `simple`, `layer1_corpus_first`, `offline_mode`, and the L2
+`l2_workstreams` join. `masterpiece_deep` is deliberately excluded — it flows into the main pipeline
+history write, so instrumenting it would double-record. Each call records **only** when the
+deterministic verifier repaired a real error (`vr.repaired`), tagged with its provenance `path`,
+`groundTruthVerified:false`, no `topScore` — so, exactly as with the simple tier, these entries can
+only add negative ground-truth signal and never dilute (`effectiveScore` floors `false`→0 and drops
+null-verdict/no-`topScore` entries). Every call is `try/catch`-guarded inside the helper, so history
+telemetry can never throw on the response path. `loopSignal.ts` gets its own unit test
+(`test-loopsignal.ts`, 17/17: no-op-when-clean, single-entry shape, no fake `topScore`, 200-cap
+eviction, corrupt-file recovery). Net: the self-patcher now learns from **every** answer path, not
+just the full pipeline. (Helper + consuming logic unit-proven; the seven `server.ts` call sites are
+one-line and typecheck clean, but — as with the first simple-tier write — were not live-exercised
+here for lack of a bootable server.) These edits sit in the request-handling region of `server.ts`,
+away from the parallel session's foreground-gate/keepalive/daemon wiring.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

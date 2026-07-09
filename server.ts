@@ -133,6 +133,7 @@ import { domainVerify } from './src/CrucibleEngine/domainVerifiers'
 import { assessCollabMode, buildClarifyResponse } from './src/CrucibleEngine/collaborationGradient'
 import { recordRoundContributions, evaluateRoster, getModelsReadyForReprobe, promoteFromBench } from './src/CrucibleEngine/rosterRotation'
 import { runSelfPatcher, loadPatches, activePatchText } from './src/CrucibleEngine/selfPatcher'
+import { recordFastPathOutcome, historyFileFor } from './src/CrucibleEngine/loopSignal'
 import { buildFailureTaxonomy, loadTaxonomy } from './src/CrucibleEngine/failureTaxonomy'
 import { recordRound as recordStageWeightRound, getStageWeightSummary, getStageMultipliers } from './src/CrucibleEngine/stageWeightLearner'
 import { getForcedModels, applyForcedSlots, recordPipelineRun, recordForcedCall } from './src/CrucibleEngine/specializationForcing'
@@ -1947,6 +1948,7 @@ app.post('/api/chat', async (req, res) => {
           const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(corpusAns.answer),
             (sys, usr) => callLocalModel(sys, usr, 8000))
           if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_corpus', issues: vr.issues }, { severity: 'info', requestId })
+          recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType: localPromptType, query: message, answer: vr.text, verifierRepaired: vr.repaired, path: 'local_only_corpus', model: 'local/apple-fm' })
           const answerText = `${vr.text}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
           debugBus.emit('pipeline', 'local_only_corpus', { confidence: corpusAns.confidence, sources: corpusAns.sources.length }, { severity: 'success', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
@@ -1971,6 +1973,7 @@ app.post('/api/chat', async (req, res) => {
               const vr = await verifyAndRepair(message, localPromptType, result.answer.trim(),
                 (sys, usr) => callLocalModel(sys, usr, 8000))
               if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_ensemble', issues: vr.issues }, { severity: 'info', requestId })
+              recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType: localPromptType, query: message, answer: vr.text, verifierRepaired: vr.repaired, path: 'local_only_ensemble', model: 'local/ensemble' })
               const contributorLabel = result.contributors.join(', ') || 'local ensemble'
               const answerText = `${vr.text}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
               debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
@@ -1993,6 +1996,7 @@ app.post('/api/chat', async (req, res) => {
           const vr = await verifyAndRepair(message, localPromptType, applyVoiceLayer(local.trim()),
             (sys, usr) => callLocalModel(sys, usr, 8000))
           if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_synth', issues: vr.issues }, { severity: 'info', requestId })
+          recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType: localPromptType, query: message, answer: vr.text, verifierRepaired: vr.repaired, path: 'local_only_synth', model: 'local/apple-fm' })
           const answerText = `${vr.text}\n\n*Answered on-device by Crucible — no external models used.*`
           debugBus.emit('pipeline', 'local_only_synth', { chars: local.length }, { severity: 'info', requestId })
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
@@ -2166,26 +2170,11 @@ app.post('/api/chat', async (req, res) => {
         recordModelOutcome(fastModel.id, reply.length > 0, latencyMs)
         triggerImprovementPass()
         summariseSession(message, reply, process.cwd(), 'success', callModel).catch(() => {})
-        // Feed the fast path into the learning loop. It bypasses the full pipeline's
+        // Feed the fast path into the learning loop — it bypasses the full pipeline's
         // history write, so without this every simple-tier answer is invisible to the
-        // self-patcher. Only record when the deterministic verifier actually caught and
-        // repaired a real error (vr.repaired) — that is a hard ground-truth low for this
-        // promptType. No ensemble ran, so no topScore; the verdict alone carries it, and
-        // writing only on repair keeps this off the hot path and out of the 200-entry cap
-        // in the clean case. Guarded so it can never break the reply.
-        if (vr.repaired) {
-          try {
-            const HF = chatUser
-              ? path.join(process.cwd(), '.crucible', `history-${chatUser.id}.json`)
-              : path.join(process.cwd(), '.crucible', 'history-default.json')
-            fs.mkdirSync(path.dirname(HF), { recursive: true })
-            let hs: any[] = []
-            try { hs = JSON.parse(fs.readFileSync(HF, 'utf8')) } catch {}
-            hs.push({ ts: Date.now(), query: message, promptType: simplePT, models: [fastModel.label], synthesis: reply, groundTruthVerified: false, path: 'simple' })
-            if (hs.length > 200) hs = hs.slice(-200)
-            fs.writeFileSync(HF, JSON.stringify(hs, null, 2))
-          } catch { /* history is best-effort; never block the response */ }
-        }
+        // self-patcher. Records only on vr.repaired (a hard ground-truth low). See
+        // loopSignal.ts for why this can only add negative signal, never dilute.
+        recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType: simplePT, query: message, answer: reply, verifierRepaired: vr.repaired, path: 'simple', model: fastModel.label })
         debugBus.emit('pipeline', 'triage_simple', { query: message.slice(0, 60), model: fastModel.label, latencyMs }, { severity: 'info', requestId })
         res.write('data: [DONE]\n\n')
         res.end()
@@ -2238,6 +2227,7 @@ app.post('/api/chat', async (req, res) => {
         const vr = await verifyAndRepair(message, promptType, applyVoiceLayer(corpusAns.answer),
           (sys, usr) => callLocalModel(sys, usr, 8000))
         if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'layer1_corpus_first', issues: vr.issues }, { severity: 'info', requestId })
+        recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType, query: message, answer: vr.text, verifierRepaired: vr.repaired, path: 'layer1_corpus_first', model: 'local/apple-fm' })
         const answerText = `${vr.text}\n\n*Answered on-device from Crucible's knowledge corpus (${domains}) — no external models used.*`
         // Mirror the proven offline-mode event shape so the client renders it identically.
         send({ type: 'contract', promptType, requiredStructure: [], forbiddenAntipatterns: [] })
@@ -2380,6 +2370,7 @@ app.post('/api/chat', async (req, res) => {
       if (vr.repaired) {
         finalOfflineText = vr.text
         debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'offline_mode', issues: vr.issues }, { severity: 'info', requestId })
+        recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType, query: message, answer: vr.text, verifierRepaired: true, path: 'offline_mode', model: 'local/apple-fm' })
       }
     }
     sendAndRecord({ type: 'layer1', modelId: 'local/apple-fm', model: 'Apple FM (offline)', text: finalOfflineText, done: true })
@@ -2663,6 +2654,7 @@ ${worldCtx}`
           if (vr.repaired) {
             finalMultipart = vr.text
             debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'l2_workstreams', issues: vr.issues }, { severity: 'info', requestId })
+            recordFastPathOutcome(historyFileFor(process.cwd(), chatUser?.id), { promptType, query: message, answer: vr.text, verifierRepaired: true, path: 'l2_workstreams', model: synthModels[0].label })
           }
         }
         sendAndRecord({ type: 'stage', stage: 1, status: 'done', avgScores: {} })
