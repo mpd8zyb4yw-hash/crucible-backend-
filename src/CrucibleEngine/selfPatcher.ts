@@ -85,6 +85,16 @@ function scoreOf(q: any): number | null {
   return typeof s === 'number' && isFinite(s) ? s : null
 }
 
+// The signal the loop actually optimises against. A deterministic verifier verdict
+// (math eval / counting / factual — persisted as groundTruthVerified) OUTRANKS the
+// ensemble's own topScore, because a fluent answer the ensemble scored 0.7 that a
+// verifier proved wrong is a worse outcome than a merely mediocre one. A confident
+// fail floors the effective score to 0; everything else falls back to topScore.
+function effectiveScore(q: any): number | null {
+  if (q?.groundTruthVerified === false) return 0
+  return scoreOf(q)
+}
+
 const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0
 
 // Analyse quality history for one promptType and, if its recent synthesised
@@ -95,21 +105,23 @@ export function analyseAndPropose(
   qualityHistory: any[],
   promptType: string
 ): Omit<PipelinePatch, 'id' | 'ts' | 'status'> | null {
-  const forType = qualityHistory.filter(q => q?.promptType === promptType && scoreOf(q) !== null)
+  const forType = qualityHistory.filter(q => q?.promptType === promptType && effectiveScore(q) !== null)
   const recent = forType.slice(-40)
   if (recent.length < 8) return null   // not enough data to trust the signal
 
-  const scores = recent.map(q => scoreOf(q) as number)
+  const scores = recent.map(q => effectiveScore(q) as number)
   const low = scores.filter(s => s < 0.55)
+  const verifierFails = recent.filter(q => q?.groundTruthVerified === false).length
   const lowRate = low.length / recent.length
   // Require both an absolute floor of failures and a meaningful rate, so a couple
   // of hard prompts don't trigger a patch on an otherwise-healthy type.
   if (low.length < 4 || lowRate < 0.25) return null
 
+  const verifierNote = verifierFails > 0 ? `, ${verifierFails} verifier-flagged wrong` : ''
   return {
     stage: 'stage5_synthesis',
     promptType,
-    problem: `${promptType}: ${low.length}/${recent.length} recent answers scored below 0.55 (avg ${avg(scores).toFixed(2)})`,
+    problem: `${promptType}: ${low.length}/${recent.length} recent answers scored below 0.55 (avg ${avg(scores).toFixed(2)}${verifierNote})`,
     patch:
       `For ${promptType} questions specifically: before finalising, restate the exact thing the ` +
       `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
@@ -133,7 +145,7 @@ export function reviewActivePatches(dir: string, qualityHistory: any[]): string[
     if (p.status !== 'active' || !p.approvedAt) continue
     const after = qualityHistory
       .filter(q => q?.promptType === p.promptType && typeof q?.ts === 'number' && q.ts > p.approvedAt!)
-      .map(scoreOf)
+      .map(effectiveScore)
       .filter((s): s is number => s !== null)
     if (after.length < 6) continue   // give the patch a fair sample before judging
 

@@ -1388,6 +1388,21 @@ the *architecture* level — the system's ground-truth outcomes drive the system
 and a refinement that doesn't help is removed — a distinct lane from single-request code
 certification.
 
+**Follow-on same session — grounded the loop's signal in deterministic verification.** `topScore`
+is still the ensemble's *own* max score (model opinion); optimising against it alone risks the
+"K-sample vote amplifies shared bias" trap. So the deterministic verifier's verdict now feeds the
+loop directly: the full-pipeline path persists `groundTruthVerified` on each history entry (set from
+`domainVerify`'s confident pass/fail at Stage 5b-pre — math eval / counting / factual), and the
+self-patcher scores off a new `effectiveScore()` that **floors a verifier-flagged-wrong answer to
+0**, outranking whatever `topScore` the ensemble gave it. Used in both proposal and rollback. Net
+effect: a fluent answer the ensemble liked (e.g. `topScore` 0.75) but a verifier *proved* wrong now
+counts as the hardest possible low — so the loop targets verifiable wrongness, not just model
+dissatisfaction. Harness extended to 15/15: a high-`topScore` promptType with verifier-flagged
+answers still earns a patch, while the same `topScore` with passing verdicts stays healthy and gets
+none. Next extension: thread `verifyAndRepair` outcomes on the early-exit/simple paths (which write
+history at other sites) the same way, so the grounded signal covers every path, not just the full
+pipeline.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

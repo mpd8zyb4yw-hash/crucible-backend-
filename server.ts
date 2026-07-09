@@ -3290,6 +3290,13 @@ ${worldCtx}`
   const shapedSynthSystem = shapingBlock ? `${synthSystemContent}\n\n${shapingBlock}` : synthSystemContent
   const enrichmentBlock = lightEnrichment ? `\n\n${lightEnrichment}` : ''
 
+  // Ground-truth verdict for this request from the DETERMINISTIC verifier (math
+  // eval / counting / factual — not a model's opinion of itself). Threaded into
+  // session history below so the self-patcher can target promptTypes that produce
+  // verifiably-WRONG answers, not merely ones the ensemble happened to score low.
+  // null = the verifier had no confident opinion (leave the signal to topScore).
+  let groundTruthVerified: boolean | null = null
+
   try {
     const synthesisMessages = [
       { role: 'system' as const, content: shapedSynthSystem },
@@ -3410,6 +3417,9 @@ ${worldCtx}`
     let verifierIssues: string[] = []
     try {
       const dvResult = await domainVerify(promptType, synthesisText, message)
+      // Only record a verdict the verifier is confident about; low-confidence
+      // stays null so we don't poison the learning signal with weak guesses.
+      if (dvResult.confidence > 0.5) groundTruthVerified = dvResult.passed
       if (!dvResult.passed && dvResult.issues.length > 0 && dvResult.confidence > 0.5) {
         verifierIssues = dvResult.issues
         debugBus.emit('pipeline', 'domain_verify_failed', { promptType, issues: dvResult.issues, confidence: dvResult.confidence }, { severity: 'warn', requestId })
@@ -3877,6 +3887,7 @@ ${worldCtx}`
       models: models.map(m => m.label),
       synthesis: pipelineSynthesisText,
       topScore: parseFloat(topScore.toFixed(3)),
+      groundTruthVerified,
       attribution,
       contributionRates,
       hardeningCohort,
