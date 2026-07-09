@@ -1399,9 +1399,23 @@ effect: a fluent answer the ensemble liked (e.g. `topScore` 0.75) but a verifier
 counts as the hardest possible low — so the loop targets verifiable wrongness, not just model
 dissatisfaction. Harness extended to 15/15: a high-`topScore` promptType with verifier-flagged
 answers still earns a patch, while the same `topScore` with passing verdicts stays healthy and gets
-none. Next extension: thread `verifyAndRepair` outcomes on the early-exit/simple paths (which write
-history at other sites) the same way, so the grounded signal covers every path, not just the full
-pipeline.
+none. 
+
+**Follow-on — fast path now feeds the loop too.** The simple-triage tier (server.ts ~L2158) runs
+`verifyAndRepair` but never wrote a history entry, so every fast-path answer was invisible to the
+self-patcher. It now records a history entry **only when `vr.repaired`** — i.e. the deterministic
+verifier actually caught and fixed a real error — tagged `path:'simple'`, `groundTruthVerified:
+false`, and deliberately with no `topScore` (no ensemble ran). This design is safe by construction:
+`effectiveScore()` floors a `false` verdict to 0 (counts as a hard low) and filters out any entry
+whose effective score is null, so fast-path entries can *only* add negative ground-truth signal for
+a promptType and can never dilute the full-pipeline signal — and writing solely on repair keeps the
+common clean case off the hot path and out of the 200-entry cap. Harness now 17/17: fast-path-shaped
+lows (no `topScore`) drive a patch while clean null-verdict entries are excluded from the
+denominator. The write is `try/catch`-guarded so it can never affect the reply. (Code-verified and
+unit-proven on the consuming side; the server-side write mirrors the proven full-pipeline pattern
+but was not live-exercised in this environment — no bootable server. Confirm live by classifying a
+simple query whose first draft is verifiably wrong and checking `groundTruthVerified:false` lands in
+`history-default.json`.)
 
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
