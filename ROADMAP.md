@@ -1555,8 +1555,20 @@ it iterated *all* keys of `scoring-weights.json`, treating the `lastUpdated` ms 
 dimensions (similarity/functional/novelty). `test-autoimprove.ts` extended to **9/9**: a genuinely
 over-weighted real dimension is still flagged, metadata never is.
 
+**Follow-on — persisted the benchmark regression signal (Priority 2 had teeth missing).** The
+benchmark suite already compared each run to the previous and detected per-promptType pass-rate drops
+— but only `console.warn`'d them, so the signal vanished: not queryable, not actionable, unable to
+feed the rollback machinery this session built. Extracted a pure, exported `detectRegressions(prev,
+curr)` and now **persist** `run.regressions` on every `BenchmarkRun` (optional field, backward-compat
+with old runs) so it's readable via `loadRuns` / the benchmarks endpoint and available to any consumer
+(e.g. wiring a benchmark regression to `autoImprove.rollbackIfDegraded` or self-patcher revert — the
+obvious next step, left as a documented hook). Pure `benchmarks.ts`, no `server.ts`. New
+`test-benchmarks.ts` (10/10): drop detection, min-sample floor, improvement/flat = no regression, and
+persistence to `benchmark-runs.json` across a degrade→recover sequence.
+
 **Session test coverage:** `test-selfpatcher.ts` 35 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
-9 · `test-history-revival.ts` 4 = **65 deterministic assertions**, all green, all no-network.
+9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **75 deterministic assertions**, all green,
+all no-network.
 
 **Verified-but-unchanged (for the other model's orientation):** the preference model is fully wired
 (train + consume); `preferenceModel.preferenceScore` is an unused dead export (weights are consumed

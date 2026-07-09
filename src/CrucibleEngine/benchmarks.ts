@@ -16,12 +16,44 @@ export interface Benchmark {
   source: 'seed' | 'failure'  // seed = hand-crafted, failure = captured from real failure
 }
 
+export interface Regression {
+  promptType: string
+  prevRate: number
+  currRate: number
+  drop: number       // prevRate - currRate, > threshold
+}
+
 export interface BenchmarkRun {
   id: string
   ts: number
   results: Array<{ benchmarkId: string; passed: boolean; score: number; synthesis: string }>
   passRate: number
   byType: Record<string, { passed: number; total: number }>
+  regressions?: Regression[]  // per-promptType drops vs the previous run (persisted, not just logged); absent on pre-existing runs
+}
+
+const REGRESSION_DROP = 0.05   // a category pass-rate drop beyond this counts as a regression
+const REGRESSION_MIN_PREV = 3  // ignore categories with too few prior samples to be meaningful
+
+// Pure: compare a run's per-type pass rates against the previous run's. Exported so
+// the signal is testable and reusable by consumers (rollback/alerting) rather than
+// buried in a console.warn.
+export function detectRegressions(
+  prevByType: BenchmarkRun['byType'] | undefined,
+  currByType: BenchmarkRun['byType'],
+): Regression[] {
+  if (!prevByType) return []
+  const out: Regression[] = []
+  for (const [pt, curr] of Object.entries(currByType)) {
+    const prev = prevByType[pt]
+    if (!prev || prev.total < REGRESSION_MIN_PREV || curr.total === 0) continue
+    const prevRate = prev.passed / prev.total
+    const currRate = curr.passed / curr.total
+    if (prevRate - currRate > REGRESSION_DROP) {
+      out.push({ promptType: pt, prevRate, currRate, drop: prevRate - currRate })
+    }
+  }
+  return out
 }
 
 const benchmarkFile = (dir: string) => path.join(dir, '.crucible', 'benchmarks.json')
@@ -101,14 +133,16 @@ export function recordBenchmarkRun(dir: string, results: BenchmarkRun['results']
     if (r.passed) byType[pt].passed++
   }
   const passed = results.filter(r => r.passed).length
+  const runs = loadRuns(dir)
+  const prev = runs[runs.length - 1]
   const run: BenchmarkRun = {
     id: `run_${Date.now()}`,
     ts: Date.now(),
     results,
     passRate: results.length ? passed / results.length : 0,
     byType,
+    regressions: detectRegressions(prev?.byType, byType),
   }
-  const runs = loadRuns(dir)
   runs.push(run)
   saveRuns(dir, runs)
   return run
@@ -137,19 +171,11 @@ export async function runBenchmarkSuite(
   const run = recordBenchmarkRun(dir, results)
   console.log(`[Benchmarks] Run complete — ${Math.round(run.passRate * 100)}% pass rate`)
 
-  // Alert if any category dropped >5% vs last run
-  const runs = loadRuns(dir)
-  if (runs.length >= 2) {
-    const prev = runs[runs.length - 2]
-    for (const [pt, curr] of Object.entries(run.byType)) {
-      const prevPt = prev.byType[pt]
-      if (!prevPt || prevPt.total < 3) continue
-      const prevRate = prevPt.passed / prevPt.total
-      const currRate = curr.passed / curr.total
-      if (prevRate - currRate > 0.05) {
-        console.warn(`[Benchmarks] REGRESSION: ${pt} dropped ${((prevRate - currRate) * 100).toFixed(1)}%`)
-      }
-    }
+  // The regression signal is now computed and PERSISTED on the run (run.regressions),
+  // so it's queryable via loadRuns / the benchmarks endpoint and actionable by a
+  // consumer (rollback/alerting) — not just a console line that vanishes.
+  for (const r of run.regressions ?? []) {
+    console.warn(`[Benchmarks] REGRESSION: ${r.promptType} dropped ${(r.drop * 100).toFixed(1)}% (${(r.prevRate * 100).toFixed(0)}%→${(r.currRate * 100).toFixed(0)}%)`)
   }
   return run
 }
