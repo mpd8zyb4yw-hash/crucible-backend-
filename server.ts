@@ -1984,8 +1984,10 @@ app.post('/api/chat', async (req, res) => {
           // Ensemble produced nothing usable — fall through to the existing single-model path below.
         }
         // 2) Local-FM synthesis — corpus missed, still answer on-device, no external calls.
+        const localFmPatch = activePatchText(process.cwd(), localPromptType, 'fastpath_answer')
         const local = await callLocalModel(
-          'You are Crucible, answering entirely on-device. Be accurate and direct. If you are unsure, say so plainly rather than inventing specifics.',
+          'You are Crucible, answering entirely on-device. Be accurate and direct. If you are unsure, say so plainly rather than inventing specifics.' +
+            (localFmPatch ? `\n\n${localFmPatch}` : ''),
           message,
           30000,
         )
@@ -2150,8 +2152,9 @@ app.post('/api/chat', async (req, res) => {
         send({ type: 'contract', promptType: simplePT, requiredStructure: [], forbiddenAntipatterns: [] })
         send({ type: 'stage', stage: 1, status: 'start' })
         const t0s = Date.now()
+        const simpleFpPatch = activePatchText(process.cwd(), simplePT, 'fastpath_answer')
         const rawReply = await callModel(fastModel, [
-          { role: 'system', content: 'Answer concisely and accurately in 1-3 sentences.' },
+          { role: 'system', content: 'Answer concisely and accurately in 1-3 sentences.' + (simpleFpPatch ? `\n\n${simpleFpPatch}` : '') },
           { role: 'user', content: message },
         ], { requestId })
         const latencyMs = Date.now() - t0s

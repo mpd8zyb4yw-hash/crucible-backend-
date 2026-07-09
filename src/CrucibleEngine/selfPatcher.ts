@@ -106,12 +106,57 @@ export interface PromptTypeStats {
   verifierFails: number  // count a deterministic verifier flagged wrong (groundTruthVerified===false)
 }
 
-// Single source of truth for how healthy a promptType looks — used by BOTH the
-// proposer and the audit view so they can never drift apart. Scores off the same
-// effectiveScore() the whole loop uses (ground truth outranks topScore).
-function promptTypeStats(qualityHistory: any[], promptType: string): PromptTypeStats {
+// ── Patch surfaces ────────────────────────────────────────────────────────────
+// A promptType can fail on two structurally different prompts, and a refinement to
+// one does nothing for the other. The full pipeline's failures live in the Stage-5
+// synthesis prompt; a single-model FAST PATH (simple triage, on-device FM synth)
+// never reaches synthesis, so its failures need a patch on its own answer prompt.
+// History entries carry a `path` tag (see loopSignal.ts); we attribute each outcome
+// to a surface by it, so a fast-path patch is proposed only from fast-path failures
+// and vice-versa — the patch lands where the failure actually is.
+//
+// Only the two fast paths whose generation prompt is cleanly patchable count as the
+// fast-path surface: 'simple' and 'local_only_synth'. Retrieval/ensemble/offline
+// joins (corpus, ensemble, l2, offline, layer1) still feed overall health but aren't
+// tied to a proposable surface, because there's no single generation prompt to steer.
+const FASTPATH_SURFACE_PATHS = new Set(['simple', 'local_only_synth'])
+const isFastpath = (q: any) => typeof q?.path === 'string' && FASTPATH_SURFACE_PATHS.has(q.path)
+const isPipeline = (q: any) => !q?.path   // full pipeline entries carry no path tag
+
+interface Surface {
+  stage: string
+  matches: (q: any) => boolean
+  patch: (promptType: string) => string
+}
+
+const SURFACES: Surface[] = [
+  {
+    stage: 'stage5_synthesis',
+    matches: isPipeline,
+    patch: (pt) =>
+      `For ${pt} questions specifically: before finalising, restate the exact thing the ` +
+      `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
+      `extra. Lead with the direct answer, then the reasoning. If the source responses disagree on a ` +
+      `key fact, resolve it explicitly rather than averaging or hedging. Prefer a correct, complete, ` +
+      `verifiable answer over a fluent one.`,
+  },
+  {
+    stage: 'fastpath_answer',
+    matches: isFastpath,
+    patch: (pt) =>
+      `For ${pt} questions answered directly (no multi-model pass): state the single most ` +
+      `directly-responsive fact first, then stop. Do not pad, hedge, or add unrequested scope. ` +
+      `If any figure, name, or step is uncertain, say so plainly instead of inventing specifics — ` +
+      `a short correct answer beats a fluent wrong one.`,
+  },
+]
+
+// Single source of truth for how healthy a promptType looks on a given surface —
+// used by BOTH the proposer and the audit view so they can never drift apart.
+// `matches` selects the surface's entries; omit it to measure the promptType overall.
+function promptTypeStats(qualityHistory: any[], promptType: string, matches?: (q: any) => boolean): PromptTypeStats {
   const recent = qualityHistory
-    .filter(q => q?.promptType === promptType && effectiveScore(q) !== null)
+    .filter(q => q?.promptType === promptType && effectiveScore(q) !== null && (!matches || matches(q)))
     .slice(-40)
   const scores = recent.map(q => effectiveScore(q) as number)
   const low = scores.filter(s => s < 0.55).length
@@ -131,29 +176,32 @@ function meetsProposalThreshold(s: PromptTypeStats): boolean {
   return s.samples >= 8 && s.low >= 4 && s.lowRate >= 0.25
 }
 
-// Analyse quality history for one promptType and, if its recent synthesised
-// answers are consistently scoring low, propose a synthesis-prompt refinement.
-// Returns null when there isn't enough signal or the promptType is healthy.
+// Propose a refinement for one (promptType, surface) if that surface is consistently
+// scoring low. Returns null when there isn't enough signal or the surface is healthy.
+function proposeForSurface(
+  qualityHistory: any[],
+  promptType: string,
+  surface: Surface,
+): Omit<PipelinePatch, 'id' | 'ts' | 'status'> | null {
+  const s = promptTypeStats(qualityHistory, promptType, surface.matches)
+  if (!meetsProposalThreshold(s)) return null
+
+  const verifierNote = s.verifierFails > 0 ? `, ${s.verifierFails} verifier-flagged wrong` : ''
+  return {
+    stage: surface.stage,
+    promptType,
+    problem: `${promptType}/${surface.stage}: ${s.low}/${s.samples} recent answers scored below 0.55 (avg ${s.avgEffectiveScore.toFixed(2)}${verifierNote})`,
+    patch: surface.patch(promptType),
+  }
+}
+
+// Back-compat thin wrapper — proposes for the synthesis surface only.
 export function analyseAndPropose(
   _debugHistory: any[],
   qualityHistory: any[],
   promptType: string
 ): Omit<PipelinePatch, 'id' | 'ts' | 'status'> | null {
-  const s = promptTypeStats(qualityHistory, promptType)
-  if (!meetsProposalThreshold(s)) return null
-
-  const verifierNote = s.verifierFails > 0 ? `, ${s.verifierFails} verifier-flagged wrong` : ''
-  return {
-    stage: 'stage5_synthesis',
-    promptType,
-    problem: `${promptType}: ${s.low}/${s.samples} recent answers scored below 0.55 (avg ${s.avgEffectiveScore.toFixed(2)}${verifierNote})`,
-    patch:
-      `For ${promptType} questions specifically: before finalising, restate the exact thing the ` +
-      `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
-      `extra. Lead with the direct answer, then the reasoning. If the source responses disagree on a ` +
-      `key fact, resolve it explicitly rather than averaging or hedging. Prefer a correct, complete, ` +
-      `verifiable answer over a fluent one.`,
-  }
+  return proposeForSurface(qualityHistory, promptType, SURFACES[0])
 }
 
 // ── Rollback ────────────────────────────────────────────────────────────────
@@ -211,27 +259,32 @@ export async function runSelfPatcher(
       .map(p => `${p.stage}|${p.promptType}`)
   )
 
+  // Each promptType is evaluated on every patch surface (synthesis + fast path)
+  // independently, so a promptType that fails only on the fast path gets a fast-path
+  // patch, not a synthesis patch that would never touch the requests that failed.
   for (const pt of promptTypes) {
-    const proposal = analyseAndPropose(debugHistory, qualityHistory, pt)
-    if (!proposal || existingKeys.has(`${proposal.stage}|${proposal.promptType}`)) continue
+    for (const surface of SURFACES) {
+      const proposal = proposeForSurface(qualityHistory, pt, surface)
+      if (!proposal || existingKeys.has(`${proposal.stage}|${proposal.promptType}`)) continue
 
-    console.log(`[SelfPatcher] Proposing patch for ${pt} ${proposal.stage}: ${proposal.problem}`)
-    try {
-      const { approved, reason } = await callTriumvirate(
-        `PIPELINE PATCH PROPOSAL\nStage: ${proposal.stage}\nPrompt type: ${proposal.promptType}\nProblem: ${proposal.problem}\nProposed patch text:\n${proposal.patch}`
-      )
-      const patch: PipelinePatch = {
-        id: `pp_${Date.now()}`,
-        ts: Date.now(),
-        ...proposal,
-        status: approved ? 'active' : 'rejected',
-        ...(approved ? { approvedAt: Date.now() } : {}),
+      console.log(`[SelfPatcher] Proposing patch for ${pt} ${proposal.stage}: ${proposal.problem}`)
+      try {
+        const { approved, reason } = await callTriumvirate(
+          `PIPELINE PATCH PROPOSAL\nStage: ${proposal.stage}\nPrompt type: ${proposal.promptType}\nProblem: ${proposal.problem}\nProposed patch text:\n${proposal.patch}`
+        )
+        const patch: PipelinePatch = {
+          id: `pp_${Date.now()}_${surface.stage}`,
+          ts: Date.now(),
+          ...proposal,
+          status: approved ? 'active' : 'rejected',
+          ...(approved ? { approvedAt: Date.now() } : {}),
+        }
+        patches.push(patch)
+        existingKeys.add(`${proposal.stage}|${proposal.promptType}`)
+        console.log(`[SelfPatcher] Patch ${approved ? 'APPROVED (active)' : 'REJECTED'}: ${reason}`)
+      } catch (e: any) {
+        console.warn('[SelfPatcher] Triumvirate call failed:', e.message)
       }
-      patches.push(patch)
-      existingKeys.add(`${proposal.stage}|${proposal.promptType}`)
-      console.log(`[SelfPatcher] Patch ${approved ? 'APPROVED (active)' : 'REJECTED'}: ${reason}`)
-    } catch (e: any) {
-      console.warn('[SelfPatcher] Triumvirate call failed:', e.message)
     }
   }
 

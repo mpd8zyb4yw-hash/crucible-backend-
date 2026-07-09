@@ -138,6 +138,50 @@ async function main() {
     ok(proposerAgrees, 'audit wouldPropose matches proposer decisions (shared threshold)')
   }
 
+  // ── 8. Patch surfaces: failures are attributed to the prompt that produced them.
+  {
+    // Fails ONLY on the fast path (path:'simple') → fastpath_answer, not synthesis.
+    const dirF = tmp()
+    const fhist: any[] = []
+    for (let i = 0; i < 12; i++) fhist.push({ ts: now - (12 - i) * 1000, promptType: 'reasoning', groundTruthVerified: false, path: 'simple' })
+    await runSelfPatcher(dirF, [], fhist, ['reasoning'], approveIf(/reasoning/))
+    const fp = loadPatches(dirF)
+    ok(fp.some(p => p.stage === 'fastpath_answer' && p.status === 'active'), 'fast-path-only failures propose a fastpath_answer patch')
+    ok(!fp.some(p => p.stage === 'stage5_synthesis'), 'fast-path-only failures do NOT propose a synthesis patch')
+    ok(activePatchText(dirF, 'reasoning', 'fastpath_answer').length > 0, 'fastpath_answer patch applies for its promptType')
+    ok(activePatchText(dirF, 'reasoning', 'stage5_synthesis') === '', 'nothing applies on the synthesis surface')
+    fs.rmSync(dirF, { recursive: true, force: true })
+
+    // Fails ONLY on the full pipeline (no path) → synthesis, not fastpath.
+    const dirP = tmp()
+    const phist: any[] = []
+    for (let i = 0; i < 20; i++) phist.push({ ts: now - (20 - i) * 1000, promptType: 'coding', topScore: i < 12 ? 0.40 : 0.72 })
+    await runSelfPatcher(dirP, [], phist, ['coding'], approveIf(/coding/))
+    const pp = loadPatches(dirP)
+    ok(pp.some(p => p.stage === 'stage5_synthesis'), 'pipeline-only failures propose a synthesis patch')
+    ok(!pp.some(p => p.stage === 'fastpath_answer'), 'pipeline-only failures do NOT propose a fastpath patch')
+    fs.rmSync(dirP, { recursive: true, force: true })
+
+    // Fails on BOTH surfaces → both patches proposed independently.
+    const dirB = tmp()
+    const bhist: any[] = []
+    for (let i = 0; i < 20; i++) bhist.push({ ts: now - (40 - i) * 1000, promptType: 'math', topScore: i < 12 ? 0.40 : 0.72 })          // pipeline lows
+    for (let i = 0; i < 12; i++) bhist.push({ ts: now - (12 - i) * 1000, promptType: 'math', groundTruthVerified: false, path: 'simple' }) // fastpath lows
+    await runSelfPatcher(dirB, [], bhist, ['math'], approveIf(/math/))
+    const bp = loadPatches(dirB)
+    ok(bp.some(p => p.stage === 'stage5_synthesis') && bp.some(p => p.stage === 'fastpath_answer'), 'both-surface failures propose both patches')
+    ok(new Set(bp.map(p => p.id)).size === bp.length, 'distinct patch ids per surface (no collision)')
+    fs.rmSync(dirB, { recursive: true, force: true })
+
+    // Non-patchable fast path (offline_mode) drives NEITHER proposable surface.
+    const dirN = tmp()
+    const nhist: any[] = []
+    for (let i = 0; i < 16; i++) nhist.push({ ts: now - (16 - i) * 1000, promptType: 'factual', groundTruthVerified: false, path: 'offline_mode' })
+    await runSelfPatcher(dirN, [], nhist, ['factual'], approveIf(/factual/))
+    ok(loadPatches(dirN).length === 0, 'a fast path with no patchable prompt (offline_mode) proposes nothing')
+    fs.rmSync(dirN, { recursive: true, force: true })
+  }
+
   console.log(`\nself-patcher regression: ${pass} passed, ${fail} failed`)
   process.exit(fail ? 1 : 0)
 }

@@ -1470,6 +1470,24 @@ the live synthesis prompt), SELF-CORRECTS (auto-rollback on a degrading trend), 
 their tests, and request-region `server.ts` seams; zero overlap with the parallel session's
 `fmQueue.ts` / `propertyVerifier.ts` / `agent/verify.ts` / `solve.ts`.
 
+**Follow-on — the loop now patches the fast path too, not just synthesis.** Added a second patch
+**surface**, `fastpath_answer`, alongside `stage5_synthesis`. Each history entry's `path` tag
+attributes its outcome to a surface (`isFastpath` = `path` ∈ {`simple`, `local_only_synth`} — the two
+fast paths with a cleanly patchable generation prompt; `isPipeline` = no `path`), so a fast-path
+patch is proposed **only** from fast-path failures and a synthesis patch only from full-pipeline
+failures — the refinement lands where the failure actually is. `runSelfPatcher` now evaluates every
+promptType on both surfaces independently; a type that fails on both earns both patches (distinct
+ids). The `fastpath_answer` patch is applied at the two patchable generation prompts — the
+simple-triage system prompt and the on-device local-FM synthesis prompt — via `activePatchText(...,
+'fastpath_answer')`. Retrieval/ensemble/offline joins (`corpus`/`ensemble`/`offline_mode`/`l2`/
+`layer1`) still feed overall health but drive no proposal, because they have no single generation
+prompt to steer — a deliberate, documented limitation. Health computation was refactored so
+`promptTypeStats` takes an optional surface filter, shared by the audit view and both proposers, so
+`/health` still can't drift from behaviour. Regression suite extended to **29/29** with nine
+surface-attribution assertions (fast-path-only→fastpath, pipeline-only→synthesis, both→both with
+distinct ids, non-patchable-path→nothing). Two-line `server.ts` apply seams sit in the request
+region, clear of the parallel session's files (isolation re-verified: 0 overlap).
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
