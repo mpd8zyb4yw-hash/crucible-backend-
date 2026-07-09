@@ -5064,6 +5064,20 @@ app.get('/api/self-patcher/patches', (_req, res) => {
   } catch (e: any) { res.json({ patches: [], error: e.message }) }
 })
 
+// GET /api/self-patcher/health — auditable snapshot of the self-improvement loop:
+// per-promptType health off the same effectiveScore/threshold the proposer uses
+// (so wouldPropose explains actual behaviour), plus patch counts by status. Lets a
+// human see WHY the loop did or didn't refine a stage before trusting it unattended.
+app.get('/api/self-patcher/health', async (_req, res) => {
+  try {
+    const { summariseLoopState } = await import('./src/CrucibleEngine/selfPatcher')
+    let qualityHistory: any[] = []
+    try { qualityHistory = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.crucible', 'history-default.json'), 'utf8')) } catch {}
+    const promptTypes = ['coding', 'reasoning', 'creative', 'factual', 'math', 'general']
+    res.json(summariseLoopState(qualityHistory, loadPatches(process.cwd()), promptTypes))
+  } catch (e: any) { res.json({ promptTypes: [], patchCounts: {}, totalPatches: 0, error: e.message }) }
+})
+
 app.post('/api/self-patcher/approve', async (req, res) => {
   try {
     const { approvePatch } = await import('./src/CrucibleEngine/selfPatcher')

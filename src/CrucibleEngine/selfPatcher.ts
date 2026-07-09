@@ -97,6 +97,40 @@ function effectiveScore(q: any): number | null {
 
 const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0
 
+export interface PromptTypeStats {
+  promptType: string
+  samples: number        // recent entries that carry a usable (non-null) effective score
+  avgEffectiveScore: number
+  low: number            // count scoring below 0.55
+  lowRate: number
+  verifierFails: number  // count a deterministic verifier flagged wrong (groundTruthVerified===false)
+}
+
+// Single source of truth for how healthy a promptType looks — used by BOTH the
+// proposer and the audit view so they can never drift apart. Scores off the same
+// effectiveScore() the whole loop uses (ground truth outranks topScore).
+function promptTypeStats(qualityHistory: any[], promptType: string): PromptTypeStats {
+  const recent = qualityHistory
+    .filter(q => q?.promptType === promptType && effectiveScore(q) !== null)
+    .slice(-40)
+  const scores = recent.map(q => effectiveScore(q) as number)
+  const low = scores.filter(s => s < 0.55).length
+  return {
+    promptType,
+    samples: recent.length,
+    avgEffectiveScore: avg(scores),
+    low,
+    lowRate: recent.length ? low / recent.length : 0,
+    verifierFails: recent.filter(q => q?.groundTruthVerified === false).length,
+  }
+}
+
+// The proposal gate: enough data, an absolute floor of failures, and a meaningful
+// rate — so a couple of hard prompts don't trigger a patch on a healthy type.
+function meetsProposalThreshold(s: PromptTypeStats): boolean {
+  return s.samples >= 8 && s.low >= 4 && s.lowRate >= 0.25
+}
+
 // Analyse quality history for one promptType and, if its recent synthesised
 // answers are consistently scoring low, propose a synthesis-prompt refinement.
 // Returns null when there isn't enough signal or the promptType is healthy.
@@ -105,23 +139,14 @@ export function analyseAndPropose(
   qualityHistory: any[],
   promptType: string
 ): Omit<PipelinePatch, 'id' | 'ts' | 'status'> | null {
-  const forType = qualityHistory.filter(q => q?.promptType === promptType && effectiveScore(q) !== null)
-  const recent = forType.slice(-40)
-  if (recent.length < 8) return null   // not enough data to trust the signal
+  const s = promptTypeStats(qualityHistory, promptType)
+  if (!meetsProposalThreshold(s)) return null
 
-  const scores = recent.map(q => effectiveScore(q) as number)
-  const low = scores.filter(s => s < 0.55)
-  const verifierFails = recent.filter(q => q?.groundTruthVerified === false).length
-  const lowRate = low.length / recent.length
-  // Require both an absolute floor of failures and a meaningful rate, so a couple
-  // of hard prompts don't trigger a patch on an otherwise-healthy type.
-  if (low.length < 4 || lowRate < 0.25) return null
-
-  const verifierNote = verifierFails > 0 ? `, ${verifierFails} verifier-flagged wrong` : ''
+  const verifierNote = s.verifierFails > 0 ? `, ${s.verifierFails} verifier-flagged wrong` : ''
   return {
     stage: 'stage5_synthesis',
     promptType,
-    problem: `${promptType}: ${low.length}/${recent.length} recent answers scored below 0.55 (avg ${avg(scores).toFixed(2)}${verifierNote})`,
+    problem: `${promptType}: ${s.low}/${s.samples} recent answers scored below 0.55 (avg ${s.avgEffectiveScore.toFixed(2)}${verifierNote})`,
     patch:
       `For ${promptType} questions specifically: before finalising, restate the exact thing the ` +
       `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
@@ -211,4 +236,45 @@ export async function runSelfPatcher(
   }
 
   if (patches.length > 0) savePatches(dir, patches)
+}
+
+// ── Audit view ────────────────────────────────────────────────────────────────
+// A read-only snapshot of what the loop currently sees and has done, for the
+// /api/self-patcher/health endpoint. Because it computes `wouldPropose` from the
+// SAME promptTypeStats + meetsProposalThreshold the proposer uses, the dashboard
+// can never disagree with the loop's actual behaviour — you can see exactly why a
+// promptType did or didn't earn a patch. Pure + read-only: no disk writes.
+export interface PromptTypeHealth extends PromptTypeStats {
+  wouldPropose: boolean       // meets the proposal threshold right now
+  activePatchIds: string[]    // active patches steering this promptType's synthesis
+}
+
+export interface LoopState {
+  promptTypes: PromptTypeHealth[]
+  patchCounts: Record<string, number>   // by status: pending/active/rejected/reverted
+  totalPatches: number
+}
+
+export function summariseLoopState(
+  qualityHistory: any[],
+  patches: PipelinePatch[],
+  promptTypes: string[],
+): LoopState {
+  const activeByType = new Map<string, string[]>()
+  for (const p of patches) {
+    if (p.status !== 'active') continue
+    const arr = activeByType.get(p.promptType) ?? []
+    arr.push(p.id)
+    activeByType.set(p.promptType, arr)
+  }
+
+  const health: PromptTypeHealth[] = promptTypes.map(pt => {
+    const s = promptTypeStats(qualityHistory, pt)
+    return { ...s, wouldPropose: meetsProposalThreshold(s), activePatchIds: activeByType.get(pt) ?? [] }
+  })
+
+  const patchCounts: Record<string, number> = {}
+  for (const p of patches) patchCounts[p.status] = (patchCounts[p.status] ?? 0) + 1
+
+  return { promptTypes: health, patchCounts, totalPatches: patches.length }
 }

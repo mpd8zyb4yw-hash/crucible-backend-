@@ -1448,6 +1448,28 @@ one-line and typecheck clean, but — as with the first simple-tier write — we
 here for lack of a bootable server.) These edits sit in the request-handling region of `server.ts`,
 away from the parallel session's foreground-gate/keepalive/daemon wiring.
 
+**Follow-on — the loop is now auditable.** A self-modifying loop that rewrites its own synthesis
+prompts unattended needs to be inspectable, or a bad decision only shows up as degraded answers.
+Extracted the health computation into a single source of truth — `promptTypeStats()` +
+`meetsProposalThreshold()` — that BOTH `analyseAndPropose` and the new audit view call, so the
+dashboard can never disagree with the loop's actual behaviour. New `summariseLoopState()` returns
+per-promptType `{samples, avgEffectiveScore, low, lowRate, verifierFails, wouldPropose,
+activePatchIds}` plus patch counts by status, surfaced at **`GET /api/self-patcher/health`** (a new
+endpoint appended beside `/patches`, additive — no collision surface). You can now see exactly why a
+promptType did or didn't earn a patch, off the same effective-score/threshold the proposer uses. The
+`analyseAndPropose` refactor is behaviour-preserving (regression suite green through it); harness
+extended to **20/20** with six audit assertions including a direct `wouldPropose`-matches-proposer
+check to guard against drift.
+
+**Loop status after this session.** The compounding loop is now end-to-end: it SENSES every answer
+path (full pipeline + all seven early exits), on a signal GROUNDED in deterministic verification
+(ground truth outranks the ensemble's self-score), DECIDES + ACTS (propose → triumvirate → apply at
+the live synthesis prompt), SELF-CORRECTS (auto-rollback on a degrading trend), is AUDITABLE
+(`/health`), and is REGRESSION-GUARDED (37 deterministic assertions across `test-selfpatcher.ts`
+20/20 + `test-loopsignal.ts` 17/17). All in this session's lane — `selfPatcher.ts`, `loopSignal.ts`,
+their tests, and request-region `server.ts` seams; zero overlap with the parallel session's
+`fmQueue.ts` / `propertyVerifier.ts` / `agent/verify.ts` / `solve.ts`.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

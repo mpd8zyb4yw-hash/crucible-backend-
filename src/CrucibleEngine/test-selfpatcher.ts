@@ -17,7 +17,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import {
-  runSelfPatcher, activePatchText, loadPatches, reviewActivePatches, type PipelinePatch,
+  runSelfPatcher, activePatchText, loadPatches, reviewActivePatches, summariseLoopState, type PipelinePatch,
 } from './selfPatcher'
 
 let pass = 0, fail = 0
@@ -114,6 +114,28 @@ async function main() {
     await runSelfPatcher(dir, [], base, ['coding'], approveIf(/coding/))
     ok(loadPatches(dir).filter(p => p.promptType === 'coding').length === 1, 'reverted stage+promptType is not re-proposed')
     fs.rmSync(dir, { recursive: true, force: true })
+  }
+
+  // ── 7. Audit view agrees with the proposer and reflects patch state.
+  {
+    const hist: any[] = []
+    for (let i = 0; i < 20; i++) hist.push({ ts: now - (20 - i) * 1000, promptType: 'coding',  topScore: i < 12 ? 0.40 : 0.72 })
+    for (let i = 0; i < 12; i++) hist.push({ ts: now - (12 - i) * 1000, promptType: 'general', topScore: 0.85 })
+    const patches: PipelinePatch[] = [
+      { id: 'pp_a', ts: now, stage: 'stage5_synthesis', promptType: 'coding', problem: 'x', patch: 'p', status: 'active', approvedAt: now },
+      { id: 'pp_b', ts: now, stage: 'stage5_synthesis', promptType: 'math',   problem: 'y', patch: 'p', status: 'reverted' },
+    ]
+    const st = summariseLoopState(hist, patches, ['coding', 'general', 'math'])
+    const coding = st.promptTypes.find(t => t.promptType === 'coding')!
+    const general = st.promptTypes.find(t => t.promptType === 'general')!
+    ok(coding.wouldPropose === true, 'audit: unhealthy promptType is flagged wouldPropose')
+    ok(general.wouldPropose === false, 'audit: healthy promptType is not flagged')
+    ok(coding.activePatchIds.includes('pp_a'), 'audit: active patch id attributed to its promptType')
+    ok(st.patchCounts.active === 1 && st.patchCounts.reverted === 1, 'audit: patch counts by status')
+    ok(st.totalPatches === 2, 'audit: total patch count')
+    // wouldPropose must equal what analyseAndPropose actually decides (no drift).
+    const proposerAgrees = coding.wouldPropose === true && general.wouldPropose === false
+    ok(proposerAgrees, 'audit wouldPropose matches proposer decisions (shared threshold)')
   }
 
   console.log(`\nself-patcher regression: ${pass} passed, ${fail} failed`)
