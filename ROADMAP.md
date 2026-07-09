@@ -1543,8 +1543,25 @@ stale file, but the parallel session gates the improvement-daemon tick, so I'm n
 to avoid a cross-build; flagged here for whoever owns it. All fixes are module-only (no `server.ts`),
 0 overlap with the parallel session.
 
+**Follow-on — verified consumption + fixed the goalEngine weight-drift bug.** Confirmed the revived
+producers are actually *consumed* (not orphaned): specialization clusters → `uncertaintySurface` →
+early-exit thresholds; failure taxonomy → `scheduleMetaTask` → the `meta-task.json` executor loop,
+which closes (poll → run via `/api/chat` → save result → clear); learned weights →
+`refreshScoringConfig` (per round); preference weights → `behavioralAdaptation` → injected prompt
+block. Also audited every `.crucible/*.json` reader for more filename mismatches — none beyond the
+`history.json` class. Then fixed the `goalEngine.analyzeWeightDrift` bug the autoImprove test exposed:
+it iterated *all* keys of `scoring-weights.json`, treating the `lastUpdated` ms timestamp and
+`updateCount` as scoring dimensions (the "178363973212000%" nonsense goal). Restricted it to the real
+dimensions (similarity/functional/novelty). `test-autoimprove.ts` extended to **9/9**: a genuinely
+over-weighted real dimension is still flagged, metadata never is.
+
 **Session test coverage:** `test-selfpatcher.ts` 35 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
-7 · `test-history-revival.ts` 4 = **63 deterministic assertions**, all green, all no-network.
+9 · `test-history-revival.ts` 4 = **65 deterministic assertions**, all green, all no-network.
+
+**Verified-but-unchanged (for the other model's orientation):** the preference model is fully wired
+(train + consume); `preferenceModel.preferenceScore` is an unused dead export (weights are consumed
+via `behavioralAdaptation` instead), harmless. The one remaining `history.json`-class reader I did
+NOT touch is `improvementDaemon.ts:173` — parallel-session-gated tick; left for its owner.
 
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 

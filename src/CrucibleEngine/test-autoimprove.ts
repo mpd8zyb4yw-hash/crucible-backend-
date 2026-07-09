@@ -9,6 +9,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { doImprovementPass, loadLearnedWeights } from './autoImprove'
+import { identifyGoals } from './goalEngine'
 
 let pass = 0, fail = 0
 const ok = (c: boolean, m: string) => { if (c) { pass++; console.log('  ok  ', m) } else { fail++; console.log('  FAIL', m) } }
@@ -66,6 +67,19 @@ async function main() {
     const dir = tmp()
     await doImprovementPass(dir)
     ok(loadLearnedWeights(dir).updateCount === 0, 'no data → clean no-op')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+
+  // ── 5. goalEngine weight-drift ignores metadata fields (lastUpdated/updateCount).
+  {
+    const dir = tmp()
+    // A genuinely over-weighted real dimension, plus the metadata the file carries.
+    fs.writeFileSync(path.join(dir, '.crucible', 'scoring-weights.json'), JSON.stringify({
+      similarity: 0.20, functional: 0.60, novelty: 0.20, lastUpdated: Date.now(), updateCount: 42,
+    }))
+    const goals = identifyGoals(dir).goals.filter(g => g.category === 'weight_drift')
+    ok(goals.some(g => /functional/.test(g.id)), 'weight-drift still flags a genuinely over-weighted real dimension')
+    ok(!goals.some(g => /lastUpdated|updateCount/.test(g.id)), 'metadata (lastUpdated/updateCount) is never treated as a scoring dimension')
     fs.rmSync(dir, { recursive: true, force: true })
   }
 

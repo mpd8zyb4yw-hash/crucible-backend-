@@ -168,8 +168,15 @@ function analyzeWeightDrift(projectPath: string): ImprovementGoal[] {
   if (!weights) return []
   const goals: ImprovementGoal[] = []
 
+  // Only the actual scoring dimensions — scoring-weights.json also carries
+  // `lastUpdated` (a ms timestamp) and `updateCount` metadata, which are NOT weights.
+  // Iterating them treated the timestamp as a dimension and emitted a nonsense
+  // "lastUpdated scoring weight is 178363973212000%" goal.
+  const SCORING_DIMS = new Set(['similarity', 'functional', 'novelty'])
+
   // Ideal range: no single dimension should dominate (> 0.55) or be suppressed (< 0.15)
   for (const [dim, val] of Object.entries(weights)) {
+    if (!SCORING_DIMS.has(dim)) continue
     if (val > 0.55) {
       goals.push({
         id: `weight_drift_high_${dim}`,
