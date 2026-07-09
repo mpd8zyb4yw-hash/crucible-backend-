@@ -86,7 +86,7 @@ function clusterLabel(members: FailureRecord[]): string {
 
 // Run k-means on recent failures. Returns updated clusters.
 export function buildFailureTaxonomy(dir: string): FailureCluster[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 

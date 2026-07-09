@@ -1528,6 +1528,24 @@ Pure `autoImprove.ts` change — no `server.ts` touch, still 0 overlap with the 
 (Noted-not-fixed: `goalEngine.identifyGoals` treats the weights object's `lastUpdated` timestamp as a
 scoring dimension and emits a nonsense "178363973212000%" goal — guarded/non-fatal, different file.)
 
+**Follow-on — swept the whole `history.json` migration bug class.** autoImprove wasn't alone: a grep
+showed **five** more modules read `.crucible/history.json` (the migrated-away legacy file) as their
+session source. Fixed the wired, in-lane ones — `specializationDetector.detectEmergentClusters`
+(emergent specialization clusters; wired to a daemon tick + `/api/…/clusters`),
+`failureTaxonomy.buildFailureTaxonomy` (failure clustering; same), `fineTuning.ts` (7 dataset
+builders behind the SFT/DPO export endpoints), and `goalEngine.analyzeCoverageGaps` — all now read
+`history-default.json`. Each had returned `[]` on the absent file, so specialization memory, failure
+taxonomy, and the fine-tune datasets were all silently empty. New `test-history-revival.ts` (4/4, no
+network — `vectorize` is a self-contained hash projection): `detectEmergentClusters` and
+`buildFailureTaxonomy` now produce real clusters from `history-default.json` and correctly ignore a
+legacy `history.json`. **Deliberately left `improvementDaemon.ts:173` alone** — it reads the same
+stale file, but the parallel session gates the improvement-daemon tick, so I'm not touching that file
+to avoid a cross-build; flagged here for whoever owns it. All fixes are module-only (no `server.ts`),
+0 overlap with the parallel session.
+
+**Session test coverage:** `test-selfpatcher.ts` 35 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
+7 · `test-history-revival.ts` 4 = **63 deterministic assertions**, all green, all no-network.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

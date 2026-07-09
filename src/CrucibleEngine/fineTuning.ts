@@ -52,7 +52,7 @@ export function saveFineTuneJobs(dir: string, jobs: FineTuneJob[]) {
 // ── F3: Build SFT dataset from history ──────────────────────────────────────
 
 export function buildSFTDataset(dir: string, minScore = 0.80): SFTEntry[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
   return sessions
@@ -96,7 +96,7 @@ export function buildDPODataset(dir: string): DPOTriple[] {
     }))
 
   // Source 2: history pairs — high score vs low score for the same promptType
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch {}
   const highScorers = sessions.filter(s => s.synthesis && (s.topScore ?? 0) >= 0.82)
@@ -248,7 +248,7 @@ export interface HardNegativeEntry {
 }
 
 export function buildHardNegativeDataset(dir: string): HardNegativeEntry[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 
@@ -289,7 +289,7 @@ export function buildHardNegativeDataset(dir: string): HardNegativeEntry[] {
 
 // K1: flag a history entry as a hard negative
 export function flagHardNegative(dir: string, query: string, correctedBy: string) {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return }
   const entry = sessions.find((s: any) => s.query === query)
@@ -313,7 +313,7 @@ export interface DisagreementEntry {
 }
 
 export function buildDisagreementDataset(dir: string, minVariance = 0.35): DisagreementEntry[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 
@@ -348,7 +348,7 @@ export function getFineTunedModelId(dir: string): string | null {
 // Extracted automatically from history entries that have a critiquePairs field.
 
 export function buildAdversarialPairs(dir: string): DPOTriple[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 
@@ -405,7 +405,7 @@ export interface CalibrationExample {
 }
 
 export function buildCalibrationDataset(dir: string): CalibrationExample[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 

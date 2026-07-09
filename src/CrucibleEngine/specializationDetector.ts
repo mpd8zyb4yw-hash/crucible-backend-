@@ -85,7 +85,7 @@ export function detectEmergentClusters(
   dir: string,
   modelScores?: Map<string, Record<string, number>>  // requestId → {modelId: score}
 ): QueryCluster[] {
-  const HISTORY_FILE = path.join(dir, '.crucible', 'history.json')
+  const HISTORY_FILE = path.join(dir, '.crucible', 'history-default.json')
   let sessions: any[] = []
   try { sessions = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) } catch { return [] }
 

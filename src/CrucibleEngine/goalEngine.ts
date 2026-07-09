@@ -251,7 +251,7 @@ function analyzeTriumvirateBalance(projectPath: string): ImprovementGoal[] {
 }
 
 function analyzeCoverageGaps(projectPath: string): ImprovementGoal[] {
-  const history = readJson<any[]>(path.join(cDir(projectPath), 'history.json'))
+  const history = readJson<any[]>(path.join(cDir(projectPath), 'history-default.json'))
   if (!history || history.length < 10) return []
   const goals: ImprovementGoal[] = []
 
