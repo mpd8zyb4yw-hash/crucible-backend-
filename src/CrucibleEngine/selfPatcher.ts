@@ -298,13 +298,20 @@ export async function runSelfPatcher(
 
 // ── Audit view ────────────────────────────────────────────────────────────────
 // A read-only snapshot of what the loop currently sees and has done, for the
-// /api/self-patcher/health endpoint. Because it computes `wouldPropose` from the
-// SAME promptTypeStats + meetsProposalThreshold the proposer uses, the dashboard
-// can never disagree with the loop's actual behaviour — you can see exactly why a
-// promptType did or didn't earn a patch. Pure + read-only: no disk writes.
-export interface PromptTypeHealth extends PromptTypeStats {
-  wouldPropose: boolean       // meets the proposal threshold right now
-  activePatchIds: string[]    // active patches steering this promptType's synthesis
+// /api/self-patcher/health endpoint. Health is reported PER SURFACE, computed from
+// the SAME promptTypeStats + meetsProposalThreshold the proposer uses on that same
+// surface — so `wouldPropose` can never disagree with the loop's actual per-surface
+// behaviour. You can see exactly why a promptType did or didn't earn a patch, and on
+// which prompt. Pure + read-only: no disk writes.
+export interface SurfaceHealth extends PromptTypeStats {
+  stage: string
+  wouldPropose: boolean       // meets the proposal threshold on THIS surface right now
+  activePatchIds: string[]    // active patches steering this promptType on this surface
+}
+
+export interface PromptTypeHealth {
+  promptType: string
+  surfaces: SurfaceHealth[]
 }
 
 export interface LoopState {
@@ -318,18 +325,22 @@ export function summariseLoopState(
   patches: PipelinePatch[],
   promptTypes: string[],
 ): LoopState {
-  const activeByType = new Map<string, string[]>()
+  const activeByKey = new Map<string, string[]>()   // `${promptType}|${stage}` → ids
   for (const p of patches) {
     if (p.status !== 'active') continue
-    const arr = activeByType.get(p.promptType) ?? []
+    const k = `${p.promptType}|${p.stage}`
+    const arr = activeByKey.get(k) ?? []
     arr.push(p.id)
-    activeByType.set(p.promptType, arr)
+    activeByKey.set(k, arr)
   }
 
-  const health: PromptTypeHealth[] = promptTypes.map(pt => {
-    const s = promptTypeStats(qualityHistory, pt)
-    return { ...s, wouldPropose: meetsProposalThreshold(s), activePatchIds: activeByType.get(pt) ?? [] }
-  })
+  const health: PromptTypeHealth[] = promptTypes.map(pt => ({
+    promptType: pt,
+    surfaces: SURFACES.map(surf => {
+      const s = promptTypeStats(qualityHistory, pt, surf.matches)
+      return { stage: surf.stage, ...s, wouldPropose: meetsProposalThreshold(s), activePatchIds: activeByKey.get(`${pt}|${surf.stage}`) ?? [] }
+    }),
+  }))
 
   const patchCounts: Record<string, number> = {}
   for (const p of patches) patchCounts[p.status] = (patchCounts[p.status] ?? 0) + 1

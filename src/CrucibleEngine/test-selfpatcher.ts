@@ -126,16 +126,28 @@ async function main() {
       { id: 'pp_b', ts: now, stage: 'stage5_synthesis', promptType: 'math',   problem: 'y', patch: 'p', status: 'reverted' },
     ]
     const st = summariseLoopState(hist, patches, ['coding', 'general', 'math'])
-    const coding = st.promptTypes.find(t => t.promptType === 'coding')!
-    const general = st.promptTypes.find(t => t.promptType === 'general')!
-    ok(coding.wouldPropose === true, 'audit: unhealthy promptType is flagged wouldPropose')
-    ok(general.wouldPropose === false, 'audit: healthy promptType is not flagged')
-    ok(coding.activePatchIds.includes('pp_a'), 'audit: active patch id attributed to its promptType')
+    const surf = (pt: string, stage: string) => st.promptTypes.find(t => t.promptType === pt)!.surfaces.find(s => s.stage === stage)!
+    ok(surf('coding', 'stage5_synthesis').wouldPropose === true, 'audit: unhealthy pipeline surface flagged wouldPropose')
+    ok(surf('general', 'stage5_synthesis').wouldPropose === false, 'audit: healthy surface not flagged')
+    ok(surf('coding', 'stage5_synthesis').activePatchIds.includes('pp_a'), 'audit: active patch attributed to its promptType+surface')
+    ok(surf('coding', 'fastpath_answer').activePatchIds.length === 0, 'audit: synthesis patch not shown on the fast-path surface')
     ok(st.patchCounts.active === 1 && st.patchCounts.reverted === 1, 'audit: patch counts by status')
     ok(st.totalPatches === 2, 'audit: total patch count')
-    // wouldPropose must equal what analyseAndPropose actually decides (no drift).
-    const proposerAgrees = coding.wouldPropose === true && general.wouldPropose === false
-    ok(proposerAgrees, 'audit wouldPropose matches proposer decisions (shared threshold)')
+
+    // Drift guard: fast-path-only failures must show wouldPropose on the fastpath
+    // surface and NOT the synthesis surface — and match what the proposer does.
+    const fh: any[] = []
+    for (let i = 0; i < 10; i++) fh.push({ ts: now - (10 - i) * 1000, promptType: 'creative', groundTruthVerified: false, path: 'simple' })
+    const dst = summariseLoopState(fh, [], ['creative'])
+    const csurf = (stage: string) => dst.promptTypes[0].surfaces.find(s => s.stage === stage)!
+    ok(csurf('fastpath_answer').wouldPropose === true, 'audit: fast-path-only failure flags the fastpath surface')
+    ok(csurf('stage5_synthesis').wouldPropose === false, 'audit: fast-path-only failure does NOT flag synthesis (no overall-stats drift)')
+    // Confirm the audit agrees with the actual proposer for the same data.
+    const dir9 = tmp()
+    await runSelfPatcher(dir9, [], fh, ['creative'], approveIf(/creative/))
+    const proposed = loadPatches(dir9)
+    ok(proposed.some(p => p.stage === 'fastpath_answer') && !proposed.some(p => p.stage === 'stage5_synthesis'), 'proposer matches the audit view exactly')
+    fs.rmSync(dir9, { recursive: true, force: true })
   }
 
   // ── 8. Patch surfaces: failures are attributed to the prompt that produced them.

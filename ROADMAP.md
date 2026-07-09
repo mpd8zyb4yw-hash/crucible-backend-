@@ -1498,6 +1498,18 @@ new entries — if repairs keep landing after it goes active it isn't helping an
 reverts it; if it helps, failures stop being recorded and it survives. Suite **32/32** (two rollback
 assertions: not reverted by degrading pipeline outcomes, reverted when its own surface keeps failing).
 
+**Follow-on — audit view made per-surface (closed a drift I'd just introduced).** Adding surfaces
+silently broke the "`/health` can't drift from behaviour" guarantee: `summariseLoopState` still
+computed `wouldPropose` from *overall* promptType stats while proposals had become per-surface, so a
+type with a few lows on each surface could look proposable overall yet match neither surface's
+threshold. Fixed: `/api/self-patcher/health` now reports health **per surface** —
+`promptTypes[].surfaces[]` each carrying `{stage, samples, avgEffectiveScore, low, lowRate,
+verifierFails, wouldPropose, activePatchIds}` — computed with the same per-surface
+`promptTypeStats`/threshold the proposer uses, and active patches attributed by `promptType|stage`.
+Suite **35/35**, including an explicit drift guard (fast-path-only failures flag the fastpath surface,
+not synthesis) plus a direct proposer-vs-audit agreement check on the same data. The endpoint returns
+the richer object unchanged; consumers read `surfaces[]`.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for
