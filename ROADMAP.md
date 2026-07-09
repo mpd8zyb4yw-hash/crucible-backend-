@@ -1510,6 +1510,24 @@ Suite **35/35**, including an explicit drift guard (fast-path-only failures flag
 not synthesis) plus a direct proposer-vs-audit agreement check on the same data. The endpoint returns
 the richer object unchanged; consumers read `surfaces[]`.
 
+**Follow-on — revived the OTHER dead learning mechanism (autoImprove weight learning).** Applied the
+same "verify, never guess" scrutiny to the self-patcher's sibling, `autoImprove.ts`. `doImprovementPass`
+opened with `history = read('.crucible/history.json'); catch { return }; if (history.length < 10)
+return` — but startup migration renames legacy `history.json` → `history-default.json`, so
+post-migration that file was **always absent** and the whole pass (pattern extraction, scoring-weight
+adjustment, goal identification, triumvirate meta-learning) returned early and never ran. The
+`history` array and its `scores` proxy were then entirely unused — every pass draws from
+`quality-history.json`, each with its own length gate — so the dead read + fatal gates were the only
+thing standing between the pass and doing its job. Removed them; the pass now runs. Verified live via
+`refreshScoringConfig()` (already called after every round at server.ts:3804), so learned weights now
+actually reach `SCORING_CONFIG` — the weight-learning loop is live for the first time, not just at
+restart-from-defaults. New `test-autoimprove.ts` (7/7, no network — triumvirate gates skip when no
+callModel is injected): the pass persists a functional-weight nudge (0.45→0.46) from coding/math-top
+history, renormalises to 1.0, respects the ≥20-sample Pass-2 gate, and no-ops cleanly on empty data.
+Pure `autoImprove.ts` change — no `server.ts` touch, still 0 overlap with the parallel session.
+(Noted-not-fixed: `goalEngine.identifyGoals` treats the weights object's `lastUpdated` timestamp as a
+scoring dimension and emits a nonsense "178363973212000%" goal — guarded/non-fatal, different file.)
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

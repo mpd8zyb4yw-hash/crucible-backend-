@@ -107,7 +107,7 @@ export function setCallModel(fn: CallModelFn, registry: any[]): void {
 
 // ── Main improvement pass ──────────────────────────────────────
 
-async function doImprovementPass(dir: string): Promise<void> {
+export async function doImprovementPass(dir: string): Promise<void> {
   // ── Drain pending queue first ──────────────────────────────
   // Retry proposals that were queued when no judge models were available.
   if (_callModel && _MODEL_REGISTRY) {
@@ -156,20 +156,18 @@ async function doImprovementPass(dir: string): Promise<void> {
     }
   }
 
-  const historyFile = path.join(dir, '.crucible', 'history.json')
-  let history: any[] = []
-  try { history = JSON.parse(fs.readFileSync(historyFile, 'utf8')) } catch { return }
-  if (history.length < 10) return  // need baseline
+  // NOTE (2026-07-09 fix): this pass previously opened with
+  //   const historyFile = path.join(dir, '.crucible', 'history.json')
+  //   try { history = JSON.parse(...) } catch { return }
+  //   if (history.length < 10) return
+  // Startup migration renames the legacy 'history.json' → 'history-default.json', so
+  // post-migration that file was ALWAYS absent and the whole improvement pass (patterns,
+  // weights, goals, meta-learning) returned early and never ran. The `history` array
+  // and its `scores` proxy were then unused anyway — every pass below draws from
+  // quality-history.json, each with its own length gate — so the dead read + fatal
+  // gates are removed and the pass now actually runs.
 
   // ── Pass 1 — Pattern extraction ────────────────────────────
-  const scores = history.map((e: any) => {
-    // Use contribution rates as proxy for quality if available, else fall back to raw score in entry
-    const avgContrib = e.contributionRates
-      ? Object.values(e.contributionRates as Record<string, number>).reduce((a, b) => a + b, 0) / Math.max(1, Object.keys(e.contributionRates).length)
-      : 0
-    return avgContrib
-  })
-
   // Top entries: either top 5% or all with score ≥ MIN_TOP_SCORE from quality-history
   const qualHistFile = path.join(dir, '.crucible', 'quality-history.json')
   let qualHistory: Array<{ promptSnippet: string; compositeScore: number; promptType: string }> = []
