@@ -182,6 +182,33 @@ async function main() {
     fs.rmSync(dirN, { recursive: true, force: true })
   }
 
+  // ── 9. Rollback is surface-aware: a patch is judged only by its own surface.
+  {
+    // Seed an active fastpath_answer patch for 'reasoning'.
+    const dir = tmp()
+    const seed: PipelinePatch[] = [{
+      id: 'pp_fp', ts: now, stage: 'fastpath_answer', promptType: 'reasoning',
+      problem: 'seed', patch: 'FASTPATH TEXT', status: 'active', approvedAt: now,
+    }]
+    fs.writeFileSync(path.join(dir, '.crucible', 'pipeline-patches.json'), JSON.stringify(seed))
+
+    // Pipeline outcomes for 'reasoning' degrade badly AFTER approval — but the patch
+    // is a fast-path patch, so this must NOT revert it (it can't affect those requests).
+    const pipelineNoise: any[] = []
+    for (let i = 0; i < 5; i++) pipelineNoise.push({ ts: now + (i + 1) * 1000, promptType: 'reasoning', topScore: 0.70 })
+    for (let i = 0; i < 5; i++) pipelineNoise.push({ ts: now + (i + 6) * 1000, promptType: 'reasoning', topScore: 0.30 })
+    ok(reviewActivePatches(dir, pipelineNoise).length === 0, 'fast-path patch is NOT reverted by degrading pipeline outcomes')
+    ok(loadPatches(dir).find(p => p.id === 'pp_fp')?.status === 'active', 'it stays active')
+
+    // Fast paths only ever record FAILURES (loopSignal writes on repair), so the
+    // patch's success signal is the ABSENCE of new fast-path entries; if repairs keep
+    // getting recorded after it went active, it isn't helping and the floor reverts it.
+    const fastStillFailing: any[] = []
+    for (let i = 0; i < 8; i++) fastStillFailing.push({ ts: now + (i + 1) * 1000, promptType: 'reasoning', groundTruthVerified: false, path: 'simple' })
+    ok(reviewActivePatches(dir, fastStillFailing).includes('pp_fp'), 'fast-path patch IS reverted when its own surface keeps failing after approval')
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+
   console.log(`\nself-patcher regression: ${pass} passed, ${fail} failed`)
   process.exit(fail ? 1 : 0)
 }

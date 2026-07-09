@@ -1488,6 +1488,16 @@ surface-attribution assertions (fast-path-only→fastpath, pipeline-only→synth
 distinct ids, non-patchable-path→nothing). Two-line `server.ts` apply seams sit in the request
 region, clear of the parallel session's files (isolation re-verified: 0 overlap).
 
+**Follow-on — rollback is surface-aware too.** With two surfaces, judging a patch by *all* of a
+promptType's outcomes would blame (or excuse) it for requests it can't touch. `reviewActivePatches`
+now filters post-approval outcomes to the patch's own surface (via the same `SURFACES` matcher), so a
+`fastpath_answer` patch is judged only by fast-path outcomes and a synthesis patch only by pipeline
+ones. This also surfaced a correct subtlety worth recording: because fast paths record **only
+failures** (`loopSignal` writes on repair), a fast-path patch's success signal is the *absence* of
+new entries — if repairs keep landing after it goes active it isn't helping and the 0.45 floor
+reverts it; if it helps, failures stop being recorded and it survives. Suite **32/32** (two rollback
+assertions: not reverted by degrading pipeline outcomes, reverted when its own surface keeps failing).
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

@@ -205,10 +205,13 @@ export function analyseAndPropose(
 }
 
 // ── Rollback ────────────────────────────────────────────────────────────────
-// Review every active patch against outcomes recorded AFTER it went live. If a
-// patch's promptType trend degraded (recent half worse than earlier half) or sits
-// below a hard floor, revert it. This is the safety half of the loop: a refinement
-// that doesn't demonstrably help is removed, so the system can't drift downward.
+// Review every active patch against outcomes recorded AFTER it went live, on the
+// SAME surface the patch steers — a fastpath_answer patch is judged by fast-path
+// outcomes, a synthesis patch by full-pipeline outcomes — so a patch is never
+// blamed (or excused) for requests it can't affect. If that surface's trend
+// degraded (recent half worse than earlier half) or sits below a hard floor, revert
+// it. This is the safety half of the loop: a refinement that doesn't demonstrably
+// help is removed, so the system can't drift downward.
 export function reviewActivePatches(dir: string, qualityHistory: any[]): string[] {
   const patches = loadPatches(dir)
   const reverted: string[] = []
@@ -216,8 +219,10 @@ export function reviewActivePatches(dir: string, qualityHistory: any[]): string[
 
   for (const p of patches) {
     if (p.status !== 'active' || !p.approvedAt) continue
+    const surfaceMatches = SURFACES.find(s => s.stage === p.stage)?.matches
     const after = qualityHistory
-      .filter(q => q?.promptType === p.promptType && typeof q?.ts === 'number' && q.ts > p.approvedAt!)
+      .filter(q => q?.promptType === p.promptType && typeof q?.ts === 'number' && q.ts > p.approvedAt!
+        && (!surfaceMatches || surfaceMatches(q)))
       .map(effectiveScore)
       .filter((s): s is number => s !== null)
     if (after.length < 6) continue   // give the patch a fair sample before judging
