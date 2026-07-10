@@ -1711,7 +1711,17 @@ app.post('/api/chat', async (req, res) => {
           allowMutation: true, allowDestructive: false, onFileMutated,
         }
         try {
-          const { ok, summary } = await runLocalPlan(localPlan, (call) => registry.exec(call, toolCtx))
+          const { ok, summary, corrections } = await runLocalPlan(
+            localPlan,
+            (call) => registry.exec(call, toolCtx),
+            (ev) => {
+              // Surface real-time outcome verification / self-correction on the debug bus
+              // and, when a step actually self-corrects, to the user via a status event.
+              debugBus.emit('agent', `local_${ev.type}`, ev as any, { severity: ev.type === 'step_failed' ? 'warn' : 'info' })
+              if (ev.type === 'self_correction') send({ type: 'status', text: `Self-correcting: ${ev.reason}` })
+            },
+          )
+          if (corrections.length) debugBus.emit('agent', 'local_intent_self_corrected', { intent: localPlan.intent, corrections }, { severity: 'info' })
           send({ type: 'final', text: summary })
           patchActiveSessionRound(chatUser, chatRoundId, { synthesis: summary, synthesisDone: true, synthStreaming: false })
           debugBus.emit('agent', 'local_intent_done', { intent: localPlan.intent, ok }, { severity: ok ? 'info' : 'warn' })

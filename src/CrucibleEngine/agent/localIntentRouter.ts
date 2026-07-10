@@ -21,12 +21,28 @@
 
 import type { ToolResult } from '../tools/protocol'
 
+/** Outcome verification for a step: did the tool actually achieve the step's intent?
+ *  This is the world-interaction analogue of code verify.ts — instead of compile/test
+ *  signals, it inspects the ToolResult and decides satisfied / recoverable / failed.
+ *  When recoverable it returns `repairArgs` and the executor retries the step once with
+ *  them (bounded self-correction), so a step that comes back empty/wrong is fixed in
+ *  real time instead of silently producing a bad final answer. */
+export interface StepExpectation {
+  /** Human reason surfaced if the expectation can't be met. */
+  describe: string
+  /** attempt is 0 on the first run, 1+ on a retry. Return ok:true when satisfied; when
+   *  not, optionally include repairArgs to retry once with adjusted arguments. */
+  check: (result: ToolResult, attempt: number) => { ok: boolean; repairArgs?: Record<string, unknown>; reason?: string }
+}
+
 export interface LocalStep {
   tool: string
   args?: Record<string, unknown>
   /** Derive args from the previous step's result (search → open chaining). Return
    *  null to abort the plan (e.g. the search found nothing). */
   deriveArgs?: (prev: ToolResult) => Record<string, unknown> | null
+  /** Optional real-time outcome check + self-correction (see StepExpectation). */
+  expect?: StepExpectation
 }
 
 export interface LocalPlan {
@@ -110,6 +126,36 @@ function nthYoutubeUrl(out: string, n: number): string | null {
   return uniq[n - 1] ?? uniq[uniq.length - 1]
 }
 
+function hasYoutubeResults(out: string): boolean {
+  return /https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}/.test(out)
+}
+
+// Self-correction for a search that came back empty: an over-specified query ("Be.Busta
+// official music video HD lyrics") often returns nothing where the bare subject would hit.
+// Drop parenthetical/qualifier filler and keep the most salient few words. Returns null when
+// simplification wouldn't change anything (so we don't retry the identical query).
+const QUERY_FILLER = /\b(?:official|music|video|audio|lyrics?|hd|4k|full|remix|version|feat\.?|ft\.?)\b/gi
+function simplifyQuery(q: string): string | null {
+  const stripped = q.replace(/\(.*?\)|\[.*?\]/g, ' ').replace(QUERY_FILLER, ' ').replace(/\s+/g, ' ').trim()
+  const words = stripped.split(' ').filter(Boolean)
+  const simpler = words.slice(0, 3).join(' ')
+  return simpler && simpler.toLowerCase() !== q.trim().toLowerCase() && simpler.length >= 2 ? simpler : null
+}
+
+/** A reusable "the search must return playable results, else simplify-and-retry once"
+ *  expectation. This is the general self-correction shared by every search→open plan. */
+function expectSearchResults(subject: string, count: number): StepExpectation {
+  return {
+    describe: `no YouTube results for "${subject}"`,
+    check: (result, attempt) => {
+      if (result.ok && hasYoutubeResults(result.output)) return { ok: true }
+      const simpler = attempt === 0 ? simplifyQuery(subject) : null
+      if (simpler) return { ok: false, reason: `no results for "${subject}", retrying as "${simpler}"`, repairArgs: { query: simpler, count } }
+      return { ok: false, reason: `no YouTube results for "${subject}"` }
+    },
+  }
+}
+
 // ── Resolvers (ordered: most specific first) ───────────────────────────────────
 
 // Compositional search-then-select: "search YouTube for X, play the third video",
@@ -174,7 +220,7 @@ function resolveSearchAndSelect(m: string): LocalPlan | null {
     intent: 'search_select_media',
     label: `Searching YouTube for "${subject}" and playing the ${where} result.`,
     steps: [
-      { tool: 'search_youtube', args: { query: subject, count } },
+      { tool: 'search_youtube', args: { query: subject, count }, expect: expectSearchResults(subject, count) },
       {
         tool: 'open_app',
         deriveArgs: (prev) => {
@@ -223,7 +269,7 @@ function resolvePlayMedia(m: string): LocalPlan | null {
     intent: 'play_media',
     label: `Searching YouTube for "${subject}" and playing the top result.`,
     steps: [
-      { tool: 'search_youtube', args: { query: subject, count: 3 } },
+      { tool: 'search_youtube', args: { query: subject, count: 3 }, expect: expectSearchResults(subject, 3) },
       {
         tool: 'open_app',
         deriveArgs: (prev) => {
@@ -312,33 +358,79 @@ export function resolveLocalIntent(message: string): LocalPlan | null {
   return null
 }
 
+/** Optional per-step self-correction telemetry, surfaced in real time (e.g. onto the debug bus). */
+export type PlanEvent =
+  | { type: 'step_start'; step: number; tool: string }
+  | { type: 'self_correction'; step: number; tool: string; attempt: number; reason: string }
+  | { type: 'step_ok'; step: number; tool: string; corrected: boolean }
+  | { type: 'step_failed'; step: number; tool: string; reason: string }
+
+const MAX_STEP_RETRIES = 1
+
 /**
- * Execute a resolved plan against a tool-exec function. Returns the per-step outputs
- * and a final summary. Aborts (ok:false) if any required step fails or a chained
- * deriveArgs returns null. Kept exec-injected so it's testable with a mock.
+ * Execute a resolved plan against a tool-exec function, verifying each step's OUTCOME (not
+ * just that the call didn't throw) and self-correcting once when a step declares an
+ * `expect`. This is the world-interaction analogue of the code heal loop: a search that
+ * comes back empty is retried with a simplified query, etc., in real time — so the plan
+ * either genuinely achieves its intent or fails honestly, never ships a wrong result.
+ * Aborts (ok:false) if a required step fails or a chained deriveArgs returns null.
+ * Kept exec-injected + event-injected so it's testable with mocks.
  */
 export async function runLocalPlan(
   plan: LocalPlan,
   exec: (call: { id: string; name: string; args: Record<string, unknown> }) => Promise<ToolResult>,
-): Promise<{ ok: boolean; outputs: ToolResult[]; summary: string }> {
+  onEvent?: (e: PlanEvent) => void,
+): Promise<{ ok: boolean; outputs: ToolResult[]; summary: string; corrections: string[] }> {
   const outputs: ToolResult[] = []
+  const corrections: string[] = []
   let prev: ToolResult | null = null
+
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i]
+    onEvent?.({ type: 'step_start', step: i, tool: step.tool })
+
     let args = step.args ?? {}
     if (step.deriveArgs) {
       const derived = prev ? step.deriveArgs(prev) : null
       if (!derived) {
-        return { ok: false, outputs, summary: `Could not complete "${plan.label}" — no usable result from the previous step.` }
+        onEvent?.({ type: 'step_failed', step: i, tool: step.tool, reason: 'no usable result from the previous step' })
+        return { ok: false, outputs, corrections, summary: `Could not complete "${plan.label}" — no usable result from the previous step.` }
       }
       args = derived
     }
-    const result = await exec({ id: `local_${i}`, name: step.tool, args })
+
+    let attempt = 0
+    let result = await exec({ id: `local_${i}`, name: step.tool, args })
     outputs.push(result)
+
+    // Outcome verification + bounded self-correction.
+    if (step.expect) {
+      let verdict = step.expect.check(result, attempt)
+      while (!verdict.ok && verdict.repairArgs && attempt < MAX_STEP_RETRIES) {
+        attempt++
+        const reason = verdict.reason ?? step.expect.describe
+        corrections.push(`${step.tool}: ${reason}`)
+        onEvent?.({ type: 'self_correction', step: i, tool: step.tool, attempt, reason })
+        args = { ...args, ...verdict.repairArgs }
+        result = await exec({ id: `local_${i}_r${attempt}`, name: step.tool, args })
+        outputs[outputs.length - 1] = result
+        verdict = step.expect.check(result, attempt)
+      }
+      if (!verdict.ok) {
+        const reason = verdict.reason ?? step.expect.describe
+        onEvent?.({ type: 'step_failed', step: i, tool: step.tool, reason })
+        return { ok: false, outputs, corrections, summary: `Could not complete "${plan.label}" — ${reason}.` }
+      }
+    }
+
     prev = result
     if (!result.ok) {
-      return { ok: false, outputs, summary: `Step ${i + 1} (${step.tool}) failed: ${result.output.slice(0, 200)}` }
+      onEvent?.({ type: 'step_failed', step: i, tool: step.tool, reason: result.output.slice(0, 120) })
+      return { ok: false, outputs, corrections, summary: `Step ${i + 1} (${step.tool}) failed: ${result.output.slice(0, 200)}` }
     }
+    onEvent?.({ type: 'step_ok', step: i, tool: step.tool, corrected: attempt > 0 })
   }
-  return { ok: true, outputs, summary: plan.label }
+
+  const note = corrections.length ? ` (self-corrected: ${corrections.join('; ')})` : ''
+  return { ok: true, outputs, corrections, summary: plan.label + note }
 }

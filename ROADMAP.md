@@ -1346,6 +1346,42 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Real-time outcome verification + self-correction for world actions
+
+Follow-up to the search-then-select fix, toward genuine autonomous novel work. The existing
+self-healing (`agent/verify.ts`) is **code-centric** — it heals against a project's compile/test/
+lint check, so for a non-code world action (YouTube/Mac/research) `detectCheck` returns null and
+the loop just trusts the tool output. The deterministic fast-path (`runLocalPlan`) executed steps
+blindly. So a step that came back empty/wrong silently produced a bad final answer — no
+understanding of whether the action *achieved its intent*.
+
+Added a general **outcome-verification + self-correction** primitive for world actions, the
+analogue of the code heal loop:
+- `StepExpectation` on a `LocalStep`: after a step runs, `check(result, attempt)` decides
+  satisfied / recoverable(+`repairArgs`) / failed by inspecting the actual `ToolResult`.
+- `runLocalPlan` now verifies each step's OUTCOME and self-corrects once (`MAX_STEP_RETRIES`) when
+  an expectation offers a repair — a bounded, anti-thrash retry, mirroring verify.ts's cap. It
+  returns the `corrections` made and emits `PlanEvent`s (`step_start`/`self_correction`/`step_ok`/
+  `step_failed`) so the correction is visible in real time.
+- Concrete first instance: `expectSearchResults` — an over-specified query that returns nothing
+  ("Be.Busta official music video HD") is automatically simplified (`simplifyQuery` drops
+  parenthetical/qualifier filler, keeps the salient few words) and retried once; a genuinely empty
+  search then fails HONESTLY with a reason instead of shipping an empty result.
+- Wired into `server.ts`: the fast-path passes an `onEvent` that streams each event to the debug
+  bus and sends the user a `status` ("Self-correcting: …") when a real correction fires, and emits
+  `local_intent_self_corrected` with the correction list.
+
+New assertions in `agent/__intent_bench.ts` (20 total): the over-specified-query self-correction
+(search retried once, plan succeeds, event emitted, summary reports it) and the honest-failure case.
+All pass; both files parse clean via esbuild.
+
+**Architectural note for the larger vision:** this generalizes beyond YouTube — any `LocalStep` can
+declare an `expect`, and the same `StepExpectation`/self-correction contract is the seam the LLM
+agent loop (`agent/loop.ts`) should adopt for non-code goals: verify each observation against the
+step's intent, repair-and-retry within a cap, escalate/replan when the cap is hit. The code path
+(`verify.ts`) and this world-action path now share the same shape (bounded heal, honest escalation);
+unifying them under one `Verifier` interface for the LLM driver is the next increment.
+
 ### 2026-07-10 — Layer 0 comprehends search-then-select ("… play the third video")
 
 **Bug (user-reported, on crucible.cam):** "Search YouTube for Be.Busta play the third video" searched

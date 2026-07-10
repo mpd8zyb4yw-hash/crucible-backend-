@@ -67,6 +67,36 @@ async function main() {
   const topN = resolveLocalIntent('search youtube for top 10 songs of 2024')
   assert(topN?.steps[0]?.args?.query === 'top 10 songs of 2024', `"top 10 songs" stays the subject, not a selector (got "${topN?.steps[0]?.args?.query}")`)
 
+  // ── SELF-CORRECTION: an over-specified query that returns nothing is simplified and
+  //    retried automatically, in real time, before the plan gives up. ──
+  {
+    const plan = resolveLocalIntent('play Be.Busta official music video HD on youtube')!
+    const events: string[] = []
+    let searchCalls = 0
+    const res = await runLocalPlan(plan, async (call) => {
+      if (call.name === 'search_youtube') {
+        searchCalls++
+        // First (over-specified) query returns nothing; the simplified retry finds results.
+        const q = String(call.args.query ?? '')
+        const found = q.toLowerCase() === 'be.busta' // simplifyQuery drops "official/music/video/hd"
+        return { ok: true, output: found ? THREE_RESULTS : 'No results found.' } as ToolResult
+      }
+      return { ok: true, output: 'opened' } as ToolResult
+    }, (e) => events.push(e.type))
+    assert(searchCalls === 2, `search was retried once after an empty result (calls=${searchCalls})`)
+    assert(res.ok && res.corrections.length === 1, 'plan self-corrected and then succeeded')
+    assert(events.includes('self_correction'), 'a self_correction event was emitted in real time')
+    assert(res.summary.includes('self-corrected'), 'the summary reports the self-correction transparently')
+  }
+
+  // ── HONEST FAILURE: when even the simplified query finds nothing, the plan fails with a
+  //    clear reason instead of shipping a wrong/empty result. ──
+  {
+    const plan = resolveLocalIntent('search youtube for zzzznonexistentquery play the first video')!
+    const res = await runLocalPlan(plan, async () => ({ ok: true, output: 'No results found.' } as ToolResult))
+    assert(!res.ok && /no youtube results/i.test(res.summary), 'a genuinely empty search fails honestly with a reason')
+  }
+
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
   process.exit(failures === 0 ? 0 : 1)
 }
