@@ -1346,6 +1346,18 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Extracted the on-device availability gate into a pure, benched module
+
+The availability logic added in the entry below (which models are usable, whether to fire the
+ensemble) lived inline in `server.ts` with zero test coverage — the trickiest new logic in the
+whole change, untested. Extracted it to `localModels/gate.ts`: `availablePool(registry,
+appleFmAvailable)` (ONNX when cached + Apple FM only when up) and `shouldFireEnsemble(pool, {
+explicit, appleFmAvailable })` (opt-in / >1 usable / Apple-FM-down-but-ONNX-present / never on
+empty). `server.ts` now calls both instead of open-coding the expressions. Added 8 gate assertions
+to `__ensemble_bench.ts` (21 total now) covering every branch: apple-fm dropped when down, ONNX
+retained, single-Mac no-fire, explicit opt-in, >1 auto-fire, lone-ONNX-when-FM-down fire, empty
+never fires. All pass; server.ts parses clean via esbuild.
+
 ### 2026-07-10 — On-device path works without Apple FM (ONNX-only hosts)
 
 Found a real North-Star gap while auditing the A0 path: the ENTIRE on-device block was gated on

@@ -23,6 +23,7 @@ import { resolveLocalIntent, runLocalPlan } from './src/CrucibleEngine/agent/loc
 import { localFmPlan, runFmPlan } from './src/CrucibleEngine/agent/localFmPlanner'
 import { corpusFirstAnswer } from './src/CrucibleEngine/corpus/corpusFirst'
 import { getRegistry as getLocalModelsRegistry, ONNX_CANDIDATES } from './src/CrucibleEngine/localModels/registry'
+import { availablePool, shouldFireEnsemble } from './src/CrucibleEngine/localModels/gate'
 import { route as routeLocalModels } from './src/CrucibleEngine/localModels/router'
 import { resolvePolicy as resolveLocalModelsPolicy } from './src/CrucibleEngine/localModels/policy'
 import { orchestrate as orchestrateLocalModels } from './src/CrucibleEngine/localModels/orchestrator'
@@ -1937,7 +1938,7 @@ app.post('/api/chat', async (req, res) => {
       // Available on-device pool: an ONNX model is usable whenever its weights are cached; the
       // Apple FM daemon only when its health check passed. This split is what lets the ensemble
       // still answer on a host where Apple FM is down but ONNX models are present (e.g. non-Mac).
-      const availableLocal = localRegistry.filter(m => m.info.id === 'apple-fm' ? localInferenceAvailable : true)
+      const availableLocal = availablePool(localRegistry, localInferenceAvailable)
       const explicitLocalMode = req.body.localMode === 'all' || req.body.localMode === 'single'
       if (localInferenceAvailable) {
         // 1) Corpus-first — strongest on-device answer when coverage is good (needs Apple FM synth).
@@ -1965,8 +1966,8 @@ app.post('/api/chat', async (req, res) => {
       // ONLY on-device route, so it must fire even for a single model. Inert in the common
       // single-Apple-FM case: pool size 1 and no opt-in → skipped, and control falls through to the
       // single local-FM synth below. See src/CrucibleEngine/localModels/ (Track B seam).
-      const ensembleShouldFire = explicitLocalMode || availableLocal.length > 1 || (!localInferenceAvailable && availableLocal.length >= 1)
-      if (ensembleShouldFire && availableLocal.length > 0) {
+      const ensembleShouldFire = shouldFireEnsemble(availableLocal, { explicit: explicitLocalMode, appleFmAvailable: localInferenceAvailable })
+      if (ensembleShouldFire) {
           const policy = resolveLocalModelsPolicy({
             requestMode: explicitLocalMode ? req.body.localMode : 'auto',
             singleModelId: req.body.localModelId,

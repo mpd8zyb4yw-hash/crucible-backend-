@@ -12,6 +12,7 @@ import { route } from './router'
 import { resolvePolicy } from './policy'
 import { orchestrate } from './orchestrator'
 import { strengthen } from './strengthen/index'
+import { availablePool, shouldFireEnsemble } from './gate'
 
 let failures = 0
 function assert(cond: boolean, msg: string) {
@@ -98,6 +99,32 @@ async function main() {
   const allFail = [cannedModel('a', 'x', '', { fail: true }), cannedModel('b', 'y', '', { fail: true })]
   const wipeout = await run(complex, allFail, 'all')
   assert(wipeout.result.answer === '' && wipeout.result.confidence === 0, 'a fully-failed pool yields an empty, zero-confidence result')
+
+  // ── gate: availablePool + shouldFireEnsemble (the server's on-device decision, unit-level) ──
+  const apple = cannedModel('apple-fm', 'apple-fm', 'x')
+  const onnx1 = cannedModel('smollm2-1.7b', 'smollm', 'x')
+  const onnx2 = cannedModel('gemma-2-2b', 'gemma', 'x')
+
+  assert(availablePool([apple], true).length === 1, 'apple-fm is in the pool when its daemon is up')
+  assert(availablePool([apple], false).length === 0, 'apple-fm is dropped from the pool when its daemon is down')
+  assert(availablePool([apple, onnx1], false).map(m => m.info.id).join() === 'smollm2-1.7b',
+    'ONNX stays in the pool even when apple-fm is down')
+
+  // common single-Apple-FM Mac: no opt-in, one model up → do NOT fire (falls to single-FM synth)
+  assert(shouldFireEnsemble([apple], { explicit: false, appleFmAvailable: true }) === false,
+    'single Apple-FM pool without opt-in does not fire the ensemble')
+  // explicit opt-in fires even on a single model
+  assert(shouldFireEnsemble([apple], { explicit: true, appleFmAvailable: true }) === true,
+    'explicit opt-in fires the ensemble on any non-empty pool')
+  // >1 usable model auto-fires
+  assert(shouldFireEnsemble([apple, onnx1], { explicit: false, appleFmAvailable: true }) === true,
+    'a >1-model pool auto-fires the ensemble')
+  // Apple FM down but one ONNX cached → fire (only on-device route)
+  assert(shouldFireEnsemble([onnx1], { explicit: false, appleFmAvailable: false }) === true,
+    'a lone ONNX model fires when Apple FM is down (only on-device route)')
+  // nothing usable → never fire
+  assert(shouldFireEnsemble([], { explicit: true, appleFmAvailable: false }) === false,
+    'an empty pool never fires, even with explicit opt-in')
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
   process.exit(failures === 0 ? 0 : 1)
