@@ -1346,6 +1346,40 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Track C: real on-device consensus strengthener (replaces best-of-1 placeholder)
+
+The on-device multi-model ensemble (`localModels/`) shipped its router/orchestrator/wiring
+(Track B, 07-07) against a **placeholder** `strengthen/index.ts` that just picked the longest
+successful output — best-of-1 dressed up as consensus. That's exactly the anti-pattern the
+free-tier philosophy exists to avoid: the loudest weak model, not the corroborated one, wins.
+
+Replaced it with a real, pure, deterministic, **offline** consensus pipeline (no embedding
+model, no network — runs anywhere the ensemble runs):
+
+- Normalizes each successful output into content-token + bigram-shingle sets, builds a pairwise
+  lexical-agreement matrix (blended unigram/bigram Jaccard).
+- **Centrality** (mean agreement with the rest) picks the answer spine — the output the group
+  most corroborates — with a median-length tie-break so one runaway-verbose output can't win on
+  word count. This is the concrete fix for "longest wins."
+- **Contributors** = every model whose output materially agrees with the spine (Jaccard ≥ 0.18),
+  i.e. independent corroboration, surfaced in the on-device attribution line.
+- **Confidence** is convergence-driven, measured over the *cluster backing the spine* (not the
+  whole pool, so a couple of off-topic outliers can't sink a genuine two-model agreement), with a
+  dedicated boost when models share a salient short answer (a number / one-token answer — the case
+  cheap models converge on most reliably, e.g. counting). Clamped to [0.5, 0.9] — this is
+  corroboration, not certainty.
+
+Wired already via Track B's seam (`server.ts` A0-block, `localMode:'all'|'single'`) — this only
+swaps the implementation behind the frozen `StrengthenResult` contract, so no server change was
+needed. New offline bench `strengthen/__strengthen_bench.ts` (14 assertions, all pass): degenerate
+empty pool, single-model passthrough, central-answer-beats-longer-garbage, salient shared-number
+boost, split-pool low-confidence, and the [0.5,0.9] confidence band. Router bench still green (no
+regression). `strengthen/index.ts` typechecks clean under `tsconfig.server.json` (the `process`
+error in the bench is the same pre-existing benign pattern the sibling `__router_bench.ts` has;
+tsx supplies node types at runtime). Could not exercise end-to-end against real on-device models —
+Track A's SmolLM2/Gemma ONNX adapters aren't landed and there's no Apple FM bridge in this sandbox
+— but the module is pure over `ModelOutput[]` and fully covered by the offline bench.
+
 ### 2026-07-07c — Extended the verification baseline to every raw exit point in server.ts
 
 Audited every `type: 'synthesis'` send site in `server.ts` (there are 14) instead of waiting for

@@ -215,6 +215,17 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   `npx tsc -p tsconfig.server.json --noEmit` error count unchanged (145 before/after — same
   pre-existing set, none new). Landed on branch `claude/vigilant-gauss-8ngw75` per this session's
   harness constraints, not pushed to `main` directly — see Decisions Log.
+- **2026-07-10 · Track C DONE** — Replaced the placeholder `strengthen/index.ts` (best-of-1
+  "longest output wins") with a real pure/offline consensus strengthener: pairwise
+  lexical-agreement matrix → centrality picks the group-corroborated spine (median-length
+  tie-break kills the longest-wins bias) → contributors = models that agree with the spine →
+  convergence- + salient-short-answer-driven confidence, measured over the spine's backing cluster
+  so outliers don't sink real agreement, clamped [0.5,0.9]. No `server.ts` change needed — swaps
+  the impl behind the frozen `StrengthenResult` contract Track B already wired. New bench
+  `strengthen/__strengthen_bench.ts` (14 assertions) passes; router bench still green;
+  `index.ts` typecheck-clean under `tsconfig.server.json`. On branch
+  `claude/crucible-on-device-9jju3x`. Track A (SmolLM2/Gemma ONNX adapters) still owns the last
+  provisional placeholder (`registry.ts`) — end-to-end multi-model consensus needs it.
 
 ---
 
