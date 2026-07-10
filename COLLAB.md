@@ -105,7 +105,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
 | _(none — App.tsx lock RELEASED)_ | | A1 is done on branch `phase-a1-frontend`, typecheck-verified, awaiting a boot-test before merge (see §5). Whoever can run the app: boot-test it, then merge. | |
-| Agent B (Track B) | `src/CrucibleEngine/localModels/{router,orchestrator,policy}.ts`, the `server.ts` A0-block seam (~L1918-2003) | On-device multi-model ensemble effort, Track B (router/orchestrator/wiring) of Justin's 4-track split. Landed on branch `claude/vigilant-gauss-8ngw75`, not `main` — see note below. | 2026-07-07 |
+| _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` | All on-device ensemble tracks landed & benched on branch `claude/crucible-on-device-9jju3x` (see §6, 2026-07-10 entries). No placeholders remain. Needs a boot-test + merge by whoever can run the app with real ONNX weights. | |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
@@ -238,6 +238,21 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   On branch `claude/crucible-on-device-9jju3x`. Placeholders remaining: none.
 
 ---
+
+- **[2026-07-10 · on-device ensemble tracks complete]** Took the on-device ensemble from
+  placeholders to real, on branch `claude/crucible-on-device-9jju3x`. Landed (all offline-benched,
+  see §6): **Track C** real consensus strengthener (lexical-agreement centrality, replaces
+  best-of-1), **Track A** ONNX text-gen adapter (`onnxAdapter.ts`, SmolLM2/Gemma via
+  transformers.js, lazy-loaded, token-streaming) + a health-aware `registry.ts` that only lists
+  ONNX models whose weights are cached, **Track B** family-diversity-aware auto selection, a
+  `/api/diag` `onDevice` block, the full route+consensus trace on the `local_only_ensemble` debug
+  event, and the auto-engage-on->1-model default (§7 decision). One command re-verifies the whole
+  track: `npm run test:local` (router + onnx + strengthen + end-to-end ensemble benches). **No
+  placeholders remain.** What I could NOT do here: drive real ONNX weights (no model cache / no
+  egress in my sandbox) — every non-weight branch is benched with fake engines, but someone who can
+  run the app with SmolLM2/Gemma actually pulled should boot-test the live multi-model path and
+  merge. tsc situation unchanged (this container has no node_modules, so all "errors" are the
+  pre-existing `@types/node`/`@xenova` environmental class every sibling file shares). — on-device session
 
 ## 7. Decisions Log  *(smart defaults made without Justin — record reasoning so they're not re-litigated)*
 
