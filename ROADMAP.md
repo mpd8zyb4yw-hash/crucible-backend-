@@ -1346,6 +1346,39 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Track A: real ONNX text-gen adapter + health-aware registry (last placeholder gone)
+
+Follow-up to Track C below. The on-device ensemble's `registry.ts` was the last provisional
+placeholder — it wrapped only the Apple FM daemon, so the "ensemble" was always a party of one and
+Track C's consensus had nothing to reach consensus *over*. Landed the real runtime:
+
+- **`localModels/onnxAdapter.ts`** — a `LocalModel` over `@xenova/transformers` text-generation
+  (SmolLM2 / Gemma family), mirroring the proven lazy-load pattern already used for embeddings in
+  `masterpiece/corpus/embed.ts`: dynamic `import()`, cache the pipeline per repo, flip the repo to
+  permanently-dead on first load failure, and degrade to an empty result (→ `ok:false` upstream)
+  instead of throwing. Everything touching transformers.js is behind an injectable `loadGenerator`
+  dep, so prompt-building, the four output shapes transformers.js can return
+  (`extractGeneratedText`), abort, and error handling are all unit-benched offline with a fake
+  engine. No network at request time — weights come from the local transformers.js cache.
+- **`localModels/registry.ts`** — now composes Apple FM + ONNX candidates (SmolLM2-1.7B/-360M,
+  Gemma-2-2b), but includes an ONNX model **only when its weights are actually cached on disk**
+  (synchronous, injectable cache probe of the transformers.js cache dir). An uninstalled model
+  never enters the pool to waste a fan-out slot on a guaranteed `ok:false`. In an environment with
+  nothing downloaded (this sandbox / CI), `getRegistry()` returns exactly `[apple-fm]` — behavior
+  identical to before, so nothing regresses until a user actually pulls a model.
+
+Wired already via Track B's seam — `getRegistry()`'s new param is optional, so `server.ts`'s
+existing zero-arg call is unchanged. New offline bench `__onnx_bench.ts` (15 assertions, all pass):
+output-shape extraction, prompt assembly, happy-path generation, unavailable→empty+unhealthy,
+throwing-generator→empty, pre-abort short-circuit, and registry include/exclude on cache presence.
+Router + strengthen benches still green. Typecheck: the only errors on the new files are the same
+environmental class every sibling has in this container (no `node_modules`, so `@types/node` and
+`@xenova/transformers` are absent — `abTesting.ts`/`embed.ts` show the identical `fs`/`@xenova`
+errors); no new *real* type errors. Could not exercise real weights end-to-end here (no model
+cache, no egress), but every non-weight branch is benched. **All three provisional placeholders
+from the 4-track split (A registry, C strengthen) are now real; Track A's onnxAdapter is the
+runtime Track A owed.**
+
 ### 2026-07-10 — Track C: real on-device consensus strengthener (replaces best-of-1 placeholder)
 
 The on-device multi-model ensemble (`localModels/`) shipped its router/orchestrator/wiring

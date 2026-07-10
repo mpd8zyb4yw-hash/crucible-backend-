@@ -226,6 +226,16 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   `index.ts` typecheck-clean under `tsconfig.server.json`. On branch
   `claude/crucible-on-device-9jju3x`. Track A (SmolLM2/Gemma ONNX adapters) still owns the last
   provisional placeholder (`registry.ts`) — end-to-end multi-model consensus needs it.
+- **2026-07-10 · Track A DONE** — Landed the real on-device runtime, replacing the last
+  placeholder (`registry.ts`, previously Apple-FM-only). New `localModels/onnxAdapter.ts` is a
+  `LocalModel` over `@xenova/transformers` text-generation (SmolLM2/Gemma), lazy-loaded like the
+  existing embedder, with all transformers.js access behind an injectable `loadGenerator` so the
+  logic is offline-benched. `registry.ts` now composes Apple FM + ONNX candidates, including an
+  ONNX model **only when its weights are cached on disk** (injectable probe) — so `getRegistry()`
+  returns `[apple-fm]` unchanged when nothing is downloaded. `getRegistry()`'s new arg is optional;
+  `server.ts` seam unchanged. Bench `__onnx_bench.ts` (15 assertions) passes; router + strengthen
+  benches green. Now the ensemble can actually be >1 model, so Track C's consensus has real inputs.
+  On branch `claude/crucible-on-device-9jju3x`. Placeholders remaining: none.
 
 ---
 
