@@ -1346,6 +1346,22 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Track B: family-diversity-aware auto model selection
+
+The router's auto path picked the top-N models by fit score, which on a real multi-family pool
+could select two near-identical same-family models (e.g. SmolLM2-1.7B + SmolLM2-360M) and leave a
+different-family model on the bench. That's a weak ensemble: consensus (Track C) is only meaningful
+when members can actually disagree — three correlated models just amplify the same mistake. This is
+the ROADMAP's own "concentration = correlated-failure risk" insight, applied to the on-device pool.
+
+Added `selectDiverse()` to the auto subset: always lead with the best-fit model, then fill the
+remaining slots preferring a family not yet represented (tie-broken by fit), falling back to
+next-best-fit once every family is covered. Single-model (trivial) selection, `all`/`single`
+modes, and the RAM-budget cap are all unchanged — diversity only reshuffles *which* models fill a
+multi-slot auto subset, never how many. Router bench grew 3 assertions (leads with best-fit; second
+slot goes to a different family over the same-family runner-up; 3-model complex pick unchanged) —
+all pass; onnx + strengthen benches still green.
+
 ### 2026-07-10 — /api/diag: on-device pool block (localMode ensemble is now observable)
 
 The one-call `/api/diag` snapshot reported the external `MODEL_REGISTRY` and a one-line

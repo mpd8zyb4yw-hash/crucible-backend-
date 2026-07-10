@@ -12,9 +12,9 @@ function assert(cond: boolean, msg: string) {
   if (!cond) { failures++; console.error(`FAIL: ${msg}`) } else { console.log(`ok: ${msg}`) }
 }
 
-function stubModel(id: string, fit: Partial<LocalModelInfo['fit']>, opts?: { installed?: boolean; delayMs?: number; fail?: boolean }): LocalModel {
+function stubModel(id: string, fit: Partial<LocalModelInfo['fit']>, opts?: { installed?: boolean; delayMs?: number; fail?: boolean; family?: string }): LocalModel {
   const info: LocalModelInfo = {
-    id, family: 'stub', params: 1, provider: 'local', quality: 7,
+    id, family: opts?.family ?? 'stub', params: 1, provider: 'local', quality: 7,
     fit: { coding: 5, reasoning: 5, creative: 5, factual: 5, math: 5, general: 5, ...fit },
     sizeBytes: 0, installed: opts?.installed ?? true, residentRAMBytes: 1,
   }
@@ -62,6 +62,21 @@ async function main() {
     [], { registry, policy: resolvePolicy({}) },
   )
   assert(complexDecision.modelIds.length === Math.min(2, registry.length), 'complex query widens the subset (capped by registry size)')
+
+  // ── auto diversity: a complex query must not pick two near-identical same-family models
+  //    when a lower-fit but different-family model is available (better consensus inputs) ──
+  const smA = stubModel('smol-a', { reasoning: 10 }, { family: 'smollm' })
+  const smB = stubModel('smol-b', { reasoning: 9 }, { family: 'smollm' })
+  const gem = stubModel('gemma-1', { reasoning: 8 }, { family: 'gemma' })
+  const complexPrompt = 'please (1) analyze this (2) then argue the counterpoint (3) and reconcile them'
+  const div = route(complexPrompt, [], { registry: [smA, smB, gem], policy: resolvePolicy({}) })
+  assert(div.modelIds.length === 3, 'complex query with 3 models picks all 3 (subset cap)')
+  // With only 2 slots (RAM budget that fits 2), the diverse picker must include the top model
+  // + a different family, not the two same-family top-fit models.
+  const twoBudget = route(complexPrompt, [], { registry: [smA, smB, gem], policy: resolvePolicy({}), ramBudgetBytes: 2 })
+  assert(twoBudget.modelIds[0] === 'smol-a', 'diverse picker still leads with the best-fit model')
+  assert(twoBudget.modelIds.includes('gemma-1') && !twoBudget.modelIds.includes('smol-b'),
+    'second slot goes to a different family (gemma) over the same-family runner-up (smol-b)')
 
   // ── all: every installed model, regardless of fit ──
   const notInstalled = stubModel('uninstalled-model', {}, { installed: false })

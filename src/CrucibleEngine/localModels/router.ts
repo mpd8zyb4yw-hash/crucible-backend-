@@ -32,6 +32,27 @@ function fitScore(model: LocalModel, promptType: ReturnType<typeof classifyPromp
   return model.info.fit[promptType] * (model.info.quality / 10)
 }
 
+// Diversity-aware subset: take the best-fit model, then fill remaining slots preferring a
+// family not already represented (breaking ties by fit). Three near-identical models make a
+// weak ensemble — consensus is only meaningful when the members can actually disagree. Mirrors
+// the ROADMAP's "concentration = correlated-failure risk" insight, applied to the local pool.
+// `ranked` must already be sorted best-fit-first.
+function selectDiverse(ranked: LocalModel[], subsetSize: number): LocalModel[] {
+  if (subsetSize <= 1 || ranked.length <= 1) return ranked.slice(0, subsetSize)
+  const picked: LocalModel[] = [ranked[0]]
+  const families = new Set<string>([ranked[0].info.family])
+  const pool = ranked.slice(1)
+  while (picked.length < subsetSize && pool.length > 0) {
+    // Prefer the highest-fit candidate whose family is new; else fall back to the highest-fit left.
+    let idx = pool.findIndex(m => !families.has(m.info.family))
+    if (idx === -1) idx = 0
+    const [next] = pool.splice(idx, 1)
+    picked.push(next)
+    families.add(next.info.family)
+  }
+  return picked
+}
+
 function withinBudget(models: LocalModel[], ramBudgetBytes?: number): LocalModel[] {
   if (!ramBudgetBytes) return models
   let used = 0
@@ -66,7 +87,7 @@ export function route(query: string, _history: { user: string; assistant: string
   const ranked = [...installed].sort((a, b) => fitScore(b, promptType) - fitScore(a, promptType))
   const complex = isComplexQuery(query)
   const subsetSize = complex ? Math.min(3, ranked.length) : 1
-  const picked = withinBudget(ranked.slice(0, subsetSize), opts.ramBudgetBytes)
+  const picked = withinBudget(selectDiverse(ranked, subsetSize), opts.ramBudgetBytes)
   const chosenIds = picked.length > 0 ? picked.map(m => m.info.id) : [ranked[0].info.id]
   return {
     modelIds: chosenIds,
