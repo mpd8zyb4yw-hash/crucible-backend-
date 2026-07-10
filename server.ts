@@ -1973,7 +1973,7 @@ app.post('/api/chat', async (req, res) => {
               if (vr.repaired) debugBus.emit('pipeline', 'baseline_verify_repaired', { path: 'local_only_ensemble', issues: vr.issues }, { severity: 'info', requestId })
               const contributorLabel = result.contributors.join(', ') || 'local ensemble'
               const answerText = `${vr.text}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
-              debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
+              debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, routeReason: decision.reason, models: decision.modelIds, method: result.method, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
               emitLocal(answerText, 'local/ensemble', 'Crucible (on-device ensemble)')
               return
             }

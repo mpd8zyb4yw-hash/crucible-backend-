@@ -1346,6 +1346,16 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Track D: full A→B→C trace on the on-device ensemble debug event
+
+The `local_only_ensemble` debug event emitted only `{ mode, contributors, confidence }` — it
+dropped the router's decision and the strengthen method, so a `/api/debug/stream` watcher couldn't
+see *why* those models fired or *which* consensus path produced the answer. Enriched it to the full
+Track A→B→C story: `routeReason` + `models` (Track B routing), `method` (Track C consensus path —
+`consensus-salient-agreement` / `consensus-central` / `central-low-agreement` / `single-model`),
+plus the existing `contributors` + `confidence`. One-line change, only in-scope symbols
+(`decision`, `result`); no behavior change, purely observability.
+
 ### 2026-07-10 — Track B: family-diversity-aware auto model selection
 
 The router's auto path picked the top-N models by fit score, which on a real multi-family pool
