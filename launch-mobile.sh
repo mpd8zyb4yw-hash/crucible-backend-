@@ -18,7 +18,7 @@ echo "│  Wi-Fi network as this Mac.             │"
 echo "└─────────────────────────────────────────┘"
 
 # Start backend
-npx tsx --no-deprecation server.ts &
+npx tsx watch --no-deprecation server.ts &
 BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 

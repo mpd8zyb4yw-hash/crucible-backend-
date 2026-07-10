@@ -33,7 +33,10 @@ function spawnBackend() {
 
   const env = { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + (process.env.PATH || ''), FORCE_COLOR: '0' };
 
-  serverProc = spawn('/opt/homebrew/bin/npx', ['tsx', 'server.ts'], {
+  // `tsx watch` so a `git pull` of new server code is picked up without a manual restart.
+  // Safe: every runtime write goes to `.crucible/` (a dot-dir tsx-watch ignores), so the
+  // server's own file writes never trigger a reload loop.
+  serverProc = spawn('/opt/homebrew/bin/npx', ['tsx', 'watch', 'server.ts'], {
     cwd,
     shell: false,
     env,
