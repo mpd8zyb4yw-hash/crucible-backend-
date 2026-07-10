@@ -1346,6 +1346,32 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Layer 0 comprehends search-then-select ("… play the third video")
+
+**Bug (user-reported, on crucible.cam):** "Search YouTube for Be.Busta play the third video" searched
+YouTube for the literal string *"the third video"* and played the top result. Root cause: the local
+intent router's `resolvePlayMedia` regex greedily grabbed "play the third video" and treated the
+ordinal SELECTOR as the search SUBJECT — losing "Be.Busta" and ignoring that "third" means *which
+result*, not *what to search*. A multi-context instruction (search subject + result selector) was
+being flattened to one fragment.
+
+**Fix (general, not a rule for this phrasing):** taught Layer 0 to separate the two facts.
+- New `resolveSearchAndSelect` resolver parses a search command into `{ subject, service, ordinal
+  selector }` and emits `search_youtube(subject) → open the Nth result`. The ordinal is understood
+  generally — words (`first`…`tenth`), `top`/`last`/`next`, and numerics (`2nd`, `9`) via
+  `parseOrdinal`; `nthYoutubeUrl` picks the Nth verified URL and clamps to the last available rather
+  than failing. Subject cleaning strips leaked service tokens ("cats on youtube" → "cats").
+- Precision guard `SELECTOR_ONLY_RE`: a subject that is itself only a selector/pronoun ("the third
+  video", "it", "that one") is rejected by both the new resolver and `resolvePlayMedia`, so a bare
+  "play the third video" defers to the smarter layers (Layer 2 FM / LLM) instead of searching for
+  the literal words. Careful not to eat quantities inside a real subject ("search for top 10 songs"
+  stays the subject — the selector requires a leading "the").
+
+New offline bench `agent/__intent_bench.ts` (16 assertions): the exact reported prompt (subject =
+"Be.Busta", opens the THIRD result), every ordinal variant, subject cleaning, over-ask clamping,
+bare-selector/pronoun deferral, the "top 10 songs" non-selector case, and regressions (plain "play
+X on youtube", open app, empty trash still resolve). All pass; router parses clean via esbuild.
+
 ### 2026-07-10 — Extracted the on-device availability gate into a pure, benched module
 
 The availability logic added in the entry below (which models are usable, whether to fire the

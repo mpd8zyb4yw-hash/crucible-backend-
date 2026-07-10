@@ -61,13 +61,131 @@ const WEB_SERVICES: Record<string, { kind: 'youtube' | 'web'; site?: string }> =
 
 const stripPunct = (s: string) => s.trim().replace(/[.!?]+$/, '').trim()
 
+// ── Ordinal / result-selector vocabulary ────────────────────────────────────────
+// A prompt like "…play the third video" carries TWO facts: a search subject AND which
+// result to pick. The ordinal ("third") is a SELECTOR, not part of the query. These
+// helpers understand that selector generally (word, numeric, top/last) so the router
+// never mistakes a selector for a search subject — the root cause of the "searched for
+// 'the third video'" failure.
+const ORDINAL_WORDS: Record<string, number> = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7,
+  eighth: 8, ninth: 9, tenth: 10, top: 1, next: 1,
+}
+// Regex fragment matching any ordinal token (word, top/last/next, or 1st/2/3rd…).
+const ORDINAL_FRAG = 'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|top|last|next|\\d{1,2}(?:st|nd|rd|th)?'
+// Nouns a result-selector can attach to ("the third VIDEO", "the top RESULT").
+const SELECTOR_NOUN = '(?:result|video|one|song|track|link|clip|item|hit)s?'
+// A trailing result-selector clause: an optional action verb, then "the <ordinal> <noun>".
+// Requiring "the" + a noun keeps this from firing on quantities inside a subject
+// (e.g. "search for top 10 songs" has no "the" before "10" → not a selector).
+const SELECTOR_RE = new RegExp(
+  `\\b(?:play|open|watch|select|pick|choose|go to)?\\s*the\\s+(${ORDINAL_FRAG})\\s+${SELECTOR_NOUN}\\s*$`, 'i')
+// A phrase that is ITSELF only a selector/pronoun — never a searchable subject.
+const SELECTOR_ONLY_RE = new RegExp(
+  `^(?:the\\s+)?(?:${ORDINAL_FRAG}|it|that|this|those|these)(?:\\s+${SELECTOR_NOUN})?$`, 'i')
+
+/** Map an ordinal token to a 1-based index; -1 for "last". null if unparseable. */
+function parseOrdinal(token: string): number | null {
+  const t = token.toLowerCase()
+  if (t === 'last') return -1
+  if (t in ORDINAL_WORDS) return ORDINAL_WORDS[t]
+  const num = t.match(/^(\d{1,2})(?:st|nd|rd|th)?$/)
+  if (num) { const n = parseInt(num[1], 10); return n >= 1 && n <= 50 ? n : null }
+  return null
+}
+
 // Parse the first verified YouTube URL out of search_youtube's text output.
 function firstYoutubeUrl(out: string): string | null {
   const m = out.match(/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}/)
   return m ? m[0] : null
 }
 
+/** The nth (1-based, -1 = last) verified YouTube URL in search output. Clamps to the last
+ *  available result when fewer were returned than requested, rather than failing. */
+function nthYoutubeUrl(out: string, n: number): string | null {
+  const urls = out.match(/https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}/g)
+  if (!urls || urls.length === 0) return null
+  const uniq = [...new Set(urls)]
+  if (n === -1) return uniq[uniq.length - 1]
+  return uniq[n - 1] ?? uniq[uniq.length - 1]
+}
+
 // ── Resolvers (ordered: most specific first) ───────────────────────────────────
+
+// Compositional search-then-select: "search YouTube for X, play the third video",
+// "find X on youtube and open the 2nd result", "look up X — play the last one".
+// This is the general fix for multi-context prompts: it separates the SEARCH SUBJECT
+// from the RESULT SELECTOR (ordinal) instead of pattern-matching one fragment. No
+// LLM. Only YouTube today (it's the one service whose result list we parse); anything
+// else returns null and defers to the smarter layers.
+function resolveSearchAndSelect(m: string): LocalPlan | null {
+  // Must read as a search command (explicit verb, or a bare "youtube <subject>").
+  const hasSearchVerb = /\b(?:search|look up|look for|find|pull up)\b/i.test(m)
+  const mentionsYouTube = /\byoutube\b/i.test(m)
+  if (!hasSearchVerb && !mentionsYouTube) return null
+  // Only wire result-list selection for YouTube; a Netflix "3rd result" has no parseable list.
+  if (/\bnetflix\b/i.test(m) && !mentionsYouTube) return null
+
+  // 1) Peel a trailing result-selector ("… play the third video") off the end.
+  let idx = 1
+  let hadSelector = false
+  let core = m
+  const sel = m.match(SELECTOR_RE)
+  if (sel && sel.index != null) {
+    const parsed = parseOrdinal(sel[1])
+    if (parsed != null) { idx = parsed; hadSelector = true; core = m.slice(0, sel.index).trim() }
+  }
+
+  // 2) Extract the search subject from what's left.
+  let subject: string | null = null
+  const forMatch = core.match(/\bfor\s+(.+?)\s*$/i)
+  if (forMatch) {
+    subject = forMatch[1]
+  } else {
+    const afterVerb = core.match(/\b(?:search|look up|look for|find|pull up)\b\s+(.+?)\s*$/i)
+    if (afterVerb) subject = afterVerb[1]
+    else {
+      const afterYt = core.match(/\byoutube\b\s+(.+?)\s*$/i)
+      if (afterYt) subject = afterYt[1]
+    }
+  }
+  if (!subject) return null
+  // Clean service tokens that leaked into the subject ("cats on youtube" → "cats").
+  subject = subject
+    .replace(/\bon\s+youtube\b/ig, '')
+    .replace(/\bin\s+youtube\b/ig, '')
+    .replace(/\byoutube\b/ig, '')
+    .replace(/^\s*for\s+/i, '')
+    .replace(/[,;:—-]+\s*$/, '')
+  subject = stripPunct(subject).trim()
+  if (!subject || subject.length < 2) return null
+  // A subject that is itself only a selector/pronoun means there's nothing real to search
+  // (e.g. a bare "play the third video") — defer to the smarter layers instead of guessing.
+  if (SELECTOR_ONLY_RE.test(subject)) return null
+
+  // If there was no explicit search verb and no selector, this is just "youtube <x>" —
+  // let resolvePlayMedia / resolveOpen own that; only claim it when we add real value
+  // (an explicit search, or a specific result selection).
+  if (!hasSearchVerb && !hadSelector) return null
+
+  const count = Math.max(3, idx === -1 ? 5 : idx)
+  const where = idx === -1 ? 'last' : idx === 1 ? 'top' : `#${idx}`
+  return {
+    intent: 'search_select_media',
+    label: `Searching YouTube for "${subject}" and playing the ${where} result.`,
+    steps: [
+      { tool: 'search_youtube', args: { query: subject, count } },
+      {
+        tool: 'open_app',
+        deriveArgs: (prev) => {
+          if (!prev.ok) return null
+          const url = nthYoutubeUrl(prev.output, idx)
+          return url ? { target: url } : null
+        },
+      },
+    ],
+  }
+}
 
 // "play <something> on youtube" / "put on <something>" / "play <x>" (defaults YT)
 function resolvePlayMedia(m: string): LocalPlan | null {
@@ -77,6 +195,10 @@ function resolvePlayMedia(m: string): LocalPlan | null {
   if (!match) return null
   const subject = stripPunct(match[1])
   if (!subject || subject.length < 2) return null
+  // Precision guard: a bare selector/pronoun ("the third video", "it", "that one") is not a
+  // searchable subject — it refers to prior context. Defer to the smarter layers rather than
+  // searching for the literal words. (search-then-select prompts are handled upstream.)
+  if (SELECTOR_ONLY_RE.test(subject)) return null
   const service = (match[2] ?? 'youtube').toLowerCase()
 
   if (service === 'spotify' || service === 'apple music' || service === 'music') {
@@ -174,7 +296,7 @@ function resolveType(m: string): LocalPlan | null {
   return { intent: 'type_text', label: `Typing "${text.slice(0, 40)}${text.length > 40 ? '…' : ''}".`, steps: [{ tool: 'type_text', args: { text } }] }
 }
 
-const RESOLVERS = [resolvePlayMedia, resolveEmptyTrash, resolveOpen, resolveClick, resolveType]
+const RESOLVERS = [resolveSearchAndSelect, resolvePlayMedia, resolveEmptyTrash, resolveOpen, resolveClick, resolveType]
 
 /**
  * Resolve a message to a deterministic tool plan, or null if no high-confidence
