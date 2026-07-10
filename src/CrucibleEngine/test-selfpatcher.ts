@@ -238,6 +238,30 @@ async function main() {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 
+  // ── 11. The corrective patch speaks to the SAME ground truth that was measured.
+  //    A coding failure (ground truth = "did the code run") must yield an
+  //    execution-targeted refinement; math a computation-targeted one; a type whose
+  //    ground truth is fuzzy (general) keeps the generic body with no invented clause.
+  {
+    const mk = (pt: string) => {
+      const h: any[] = []
+      for (let i = 0; i < 20; i++) h.push({ ts: now - (20 - i) * 1000, promptType: pt, topScore: i < 12 ? 0.40 : 0.72 })
+      return h
+    }
+    const dirC = tmp(), dirM = tmp(), dirG = tmp()
+    await runSelfPatcher(dirC, [], mk('coding'),  ['coding'],  approveIf(/coding/))
+    await runSelfPatcher(dirM, [], mk('math'),    ['math'],    approveIf(/math/))
+    await runSelfPatcher(dirG, [], mk('general'), ['general'], approveIf(/general/))
+    const codingText  = activePatchText(dirC, 'coding',  'stage5_synthesis')
+    const mathText    = activePatchText(dirM, 'math',    'stage5_synthesis')
+    const generalText = activePatchText(dirG, 'general', 'stage5_synthesis')
+    ok(/run AS-IS|import/.test(codingText), 'coding patch targets execution (the coding ground-truth signal)')
+    ok(!/run AS-IS|import/.test(generalText), 'the coding clause does not leak into other promptTypes')
+    ok(/numeric result|arithmetic/.test(mathText), 'math patch targets the computation (the math ground-truth signal)')
+    ok(generalText.length > 0 && !/numeric result|run AS-IS/.test(generalText), 'a fuzzy-ground-truth type keeps the generic body with no invented clause')
+    fs.rmSync(dirC, { recursive: true, force: true }); fs.rmSync(dirM, { recursive: true, force: true }); fs.rmSync(dirG, { recursive: true, force: true })
+  }
+
   console.log(`\nself-patcher regression: ${pass} passed, ${fail} failed`)
   process.exit(fail ? 1 : 0)
 }

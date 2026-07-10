@@ -129,6 +129,31 @@ interface Surface {
   patch: (promptType: string) => string
 }
 
+// The loop SENSES failure through the ground-truth signal, which is promptType-
+// specific: for coding it is "did the code actually execute" (codeExecVerdict →
+// groundTruthVerified), for math it is "does the number check out" (deterministic
+// eval). A corrective patch is only worth applying if it speaks to the SAME thing
+// that was measured as failing — a generic "restate the question" clause does
+// nothing about code that won't run. So each surface's patch appends a promptType-
+// targeted clause for the types whose ground truth is deterministic; every other
+// type keeps the generic body alone (its ground truth is fuzzier, so a specific
+// instruction would be guessing).
+function typeGuidance(promptType: string): string {
+  switch (promptType) {
+    case 'coding':
+      return ` For code specifically: the code must run AS-IS — include every import and ` +
+        `definition it uses, leave no placeholder, TODO, or ellipsis, and make sure it handles ` +
+        `the inputs the question states. A shorter snippet that actually executes beats a longer ` +
+        `one that looks right but would throw.`
+    case 'math':
+      return ` For math specifically: carry out the computation step by step, then state the ` +
+        `final numeric result explicitly on its own line, exactly as asked (units, rounding). ` +
+        `Re-check the arithmetic before finalising — a confident wrong number is the worst outcome.`
+    default:
+      return ''
+  }
+}
+
 const SURFACES: Surface[] = [
   {
     stage: 'stage5_synthesis',
@@ -138,7 +163,7 @@ const SURFACES: Surface[] = [
       `question asks for and confirm the answer delivers precisely that — nothing missing, nothing ` +
       `extra. Lead with the direct answer, then the reasoning. If the source responses disagree on a ` +
       `key fact, resolve it explicitly rather than averaging or hedging. Prefer a correct, complete, ` +
-      `verifiable answer over a fluent one.`,
+      `verifiable answer over a fluent one.` + typeGuidance(pt),
   },
   {
     stage: 'fastpath_answer',
@@ -147,7 +172,7 @@ const SURFACES: Surface[] = [
       `For ${pt} questions answered directly (no multi-model pass): state the single most ` +
       `directly-responsive fact first, then stop. Do not pad, hedge, or add unrequested scope. ` +
       `If any figure, name, or step is uncertain, say so plainly instead of inventing specifics — ` +
-      `a short correct answer beats a fluent wrong one.`,
+      `a short correct answer beats a fluent wrong one.` + typeGuidance(pt),
   },
 ]
 
@@ -278,7 +303,7 @@ export async function runSelfPatcher(
           `PIPELINE PATCH PROPOSAL\nStage: ${proposal.stage}\nPrompt type: ${proposal.promptType}\nProblem: ${proposal.problem}\nProposed patch text:\n${proposal.patch}`
         )
         const patch: PipelinePatch = {
-          id: `pp_${Date.now()}_${surface.stage}`,
+          id: `pp_${Date.now()}_${surface.stage}_${proposal.promptType}`,
           ts: Date.now(),
           ...proposal,
           status: approved ? 'active' : 'rejected',

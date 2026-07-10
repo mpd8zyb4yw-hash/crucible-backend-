@@ -1581,8 +1581,20 @@ session's lane). `test-selfpatcher.ts` extended to **38/38** with the explicit s
 coding answers that failed execution drive a coding *synthesis* patch (not fast-path), and the learned
 refinement applies to the code-synthesis prompt.
 
-**Session test coverage:** `test-selfpatcher.ts` 38 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
-9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **78 deterministic assertions**, all green,
+**Follow-on — the corrective patch now speaks to the ground truth it was triggered by.** A learned
+patch is only useful if it addresses the same thing that was measured as failing — a generic "restate
+the question" clause does nothing about code that won't run. Added `typeGuidance(promptType)`, appended
+to both surfaces' patch text: `coding` gets an execution-targeted clause (runs AS-IS, every import and
+definition present, no placeholder/TODO/ellipsis, handles the stated inputs — a shorter snippet that
+executes beats a longer one that throws); `math` gets a computation-targeted clause (carry out the
+steps, state the final number explicitly, re-check arithmetic). Every other promptType keeps the
+generic body alone — its ground truth is fuzzier, so a specific instruction would be guessing. Also
+hardened the patch id (`pp_${ts}_${stage}_${promptType}`) against same-millisecond collisions when
+multiple types are patched at once. `test-selfpatcher.ts` **42/42**: the coding patch targets
+execution, math targets the computation, neither clause leaks into a fuzzy type.
+
+**Session test coverage:** `test-selfpatcher.ts` 42 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
+9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **82 deterministic assertions**, all green,
 all no-network.
 
 **Verified-but-unchanged (for the other model's orientation):** the preference model is fully wired
