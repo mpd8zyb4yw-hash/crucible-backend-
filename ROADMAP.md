@@ -1346,6 +1346,22 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — On-device ensemble auto-engages when >1 local model is installed
+
+Until now the multi-model on-device consensus fired ONLY on an explicit `localMode:'all'|'single'`
+in the request body — so even a user who had pulled SmolLM2 + Gemma still got a single Apple-FM
+call by default. That's backwards for the North Star ("lean on on-device capability"): when the
+pool genuinely has more than one installed model, auto-mode consensus (Track B routing → Track C
+strengthen) is strictly better than one FM call and should be the default.
+
+Changed the A0 local-only path's ensemble gate to fire when **either** the client opts in
+explicitly **or** `getRegistry()` reports more than one installed model (auto mode). This stays
+inert in the common case by construction: with only the Apple FM daemon installed and no ONNX
+weights cached, the pool size is 1, the condition is false, and control falls through to the
+existing single-FM synth — default behavior is unchanged until a user actually installs a second
+local model. Uses the same `getRegistry()`/route/orchestrate/strengthen seam already in place; the
+only change is the trigger condition + auto-mode policy when not explicitly set.
+
 ### 2026-07-10 — Track D: full A→B→C trace on the on-device ensemble debug event
 
 The `local_only_ensemble` debug event emitted only `{ mode, contributors, confidence }` — it

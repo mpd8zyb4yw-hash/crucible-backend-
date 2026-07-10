@@ -1952,14 +1952,22 @@ app.post('/api/chat', async (req, res) => {
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
         }
-        // 1.5) Local ensemble — explicit multi-model opt-in (`localMode: 'all' | 'single'`
-        // in the request body). Purely additive: only fires when a client asks for it, so
-        // the default `localMode` unset / 'auto' behaviour below (single local-FM call) is
-        // unchanged for existing clients. See src/CrucibleEngine/localModels/ (Track B seam,
-        // COLLAB.md 2026-07-07).
-        if (req.body.localMode === 'all' || req.body.localMode === 'single') {
-          const localRegistry = getLocalModelsRegistry()
-          const policy = resolveLocalModelsPolicy({ requestMode: req.body.localMode, singleModelId: req.body.localModelId })
+        // 1.5) Local ensemble. Fires when EITHER the client explicitly opts in
+        // (`localMode: 'all' | 'single'`) OR the on-device pool actually has more than one
+        // installed model — in which case auto-mode consensus is strictly better than a single
+        // FM call and the North Star ("lean on on-device capability") wants it by default.
+        // Crucially this is still inert in the common case: with only the Apple FM daemon
+        // installed (no ONNX weights cached) the pool size is 1, so the condition is false and
+        // control falls through to the single local-FM synth below — default behavior unchanged.
+        // See src/CrucibleEngine/localModels/ (Track B seam, COLLAB.md 2026-07-07).
+        const localRegistry = getLocalModelsRegistry()
+        const installedLocalCount = localRegistry.filter(m => m.info.installed).length
+        const explicitLocalMode = req.body.localMode === 'all' || req.body.localMode === 'single'
+        if (explicitLocalMode || installedLocalCount > 1) {
+          const policy = resolveLocalModelsPolicy({
+            requestMode: explicitLocalMode ? req.body.localMode : 'auto',
+            singleModelId: req.body.localModelId,
+          })
           const decision = routeLocalModels(message, history, { registry: localRegistry, policy })
           if (decision.modelIds.length > 0) {
             const outputs = await orchestrateLocalModels(decision, message, { registry: localRegistry, history })

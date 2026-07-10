@@ -287,3 +287,11 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   merging to `main` needs either an explicit ask to the user or another agent instance that isn't
   under the same constraint. Flagging so whoever reconciles the 4 tracks knows this branch exists
   and isn't stale/abandoned work.
+- **2026-07-10 · On-device ensemble now auto-engages on a >1-model pool (revises the 2026-07-07
+  Track B "opt-in only" decision).** The original decision kept the ensemble strictly opt-in to
+  avoid changing default behavior while Phase A1 was mid-flight. That constraint has passed, and
+  leaving consensus behind an explicit flag meant a user who installed SmolLM2 + Gemma still got a
+  single Apple-FM call by default — contrary to the North Star. New rule: the A0 ensemble fires
+  when the client opts in OR `getRegistry()` reports >1 installed model. This is still inert with
+  only Apple FM installed (pool size 1), so no existing environment changes; it only activates once
+  a real second local model is present. Reversible (one condition), documented here.
