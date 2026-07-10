@@ -1346,6 +1346,26 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — On-device path works without Apple FM (ONNX-only hosts)
+
+Found a real North-Star gap while auditing the A0 path: the ENTIRE on-device block was gated on
+`if (localInferenceAvailable)` — i.e. Apple FM daemon health. So a host with SmolLM2/Gemma weights
+cached but no Apple FM daemon (any non-Mac) got the honest "on-device not available" message even
+though genuinely on-device ONNX models could answer. That contradicts the offline-first premise.
+
+Restructured the A0 block so the Apple-FM-dependent branches (corpus-first synth, single-FM synth)
+stay gated on `localInferenceAvailable`, but the ONNX ensemble runs over an `availableLocal` pool =
+ONNX models (usable whenever cached) + Apple FM (only when its daemon is up). The ensemble now
+fires when the client opts in, when the pool has >1 usable model, OR when Apple FM is down but ≥1
+ONNX model is cached — in that last case it's the only on-device route, so it fires even for a
+single model. Route/orchestrate now target `availableLocal`, so a down Apple FM is never routed to.
+
+Fully inert on the common single-Apple-FM Mac (availableLocal = [apple-fm], pool size 1, no opt-in
+→ falls through to the existing single-FM synth, unchanged) and on a bare host with nothing cached
+(availableLocal empty → honest fallback, unchanged). Verified server.ts parses cleanly via esbuild
+(exit 0; only a pre-existing unrelated duplicate-key warning). Brace structure re-checked by hand:
+try → corpus-if → ensemble-if → single-FM-if → honest fallback → catch.
+
 ### 2026-07-10 — End-to-end on-device ensemble bench + `npm run test:local`
 
 The per-module benches (router / onnx / strengthen) each cover one seam but nothing exercised the

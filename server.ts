@@ -1933,8 +1933,14 @@ app.post('/api/chat', async (req, res) => {
       res.write('data: [DONE]\n\n'); res.end()
     }
     try {
+      const localRegistry = getLocalModelsRegistry()
+      // Available on-device pool: an ONNX model is usable whenever its weights are cached; the
+      // Apple FM daemon only when its health check passed. This split is what lets the ensemble
+      // still answer on a host where Apple FM is down but ONNX models are present (e.g. non-Mac).
+      const availableLocal = localRegistry.filter(m => m.info.id === 'apple-fm' ? localInferenceAvailable : true)
+      const explicitLocalMode = req.body.localMode === 'all' || req.body.localMode === 'single'
       if (localInferenceAvailable) {
-        // 1) Corpus-first — strongest on-device answer when coverage is good.
+        // 1) Corpus-first — strongest on-device answer when coverage is good (needs Apple FM synth).
         const corpusAns = await Promise.race([
           corpusFirstAnswer(message, localPromptType, { localSynth: (sys: string, usr: string) => callLocalModel(sys, usr, 20000) }),
           new Promise<null>(resolve => setTimeout(() => resolve(null), 3000)),
@@ -1952,25 +1958,22 @@ app.post('/api/chat', async (req, res) => {
           emitLocal(answerText, 'local/apple-fm', 'Crucible (on-device)')
           return
         }
-        // 1.5) Local ensemble. Fires when EITHER the client explicitly opts in
-        // (`localMode: 'all' | 'single'`) OR the on-device pool actually has more than one
-        // installed model — in which case auto-mode consensus is strictly better than a single
-        // FM call and the North Star ("lean on on-device capability") wants it by default.
-        // Crucially this is still inert in the common case: with only the Apple FM daemon
-        // installed (no ONNX weights cached) the pool size is 1, so the condition is false and
-        // control falls through to the single local-FM synth below — default behavior unchanged.
-        // See src/CrucibleEngine/localModels/ (Track B seam, COLLAB.md 2026-07-07).
-        const localRegistry = getLocalModelsRegistry()
-        const installedLocalCount = localRegistry.filter(m => m.info.installed).length
-        const explicitLocalMode = req.body.localMode === 'all' || req.body.localMode === 'single'
-        if (explicitLocalMode || installedLocalCount > 1) {
+      }
+      // 1.5) Local ensemble — runs over the AVAILABLE local pool. Fires when the client opts in
+      // explicitly, when the pool has >1 usable model (auto consensus beats a single call), OR
+      // when Apple FM is down but ≥1 ONNX model is cached — in that last case the ensemble is the
+      // ONLY on-device route, so it must fire even for a single model. Inert in the common
+      // single-Apple-FM case: pool size 1 and no opt-in → skipped, and control falls through to the
+      // single local-FM synth below. See src/CrucibleEngine/localModels/ (Track B seam).
+      const ensembleShouldFire = explicitLocalMode || availableLocal.length > 1 || (!localInferenceAvailable && availableLocal.length >= 1)
+      if (ensembleShouldFire && availableLocal.length > 0) {
           const policy = resolveLocalModelsPolicy({
             requestMode: explicitLocalMode ? req.body.localMode : 'auto',
             singleModelId: req.body.localModelId,
           })
-          const decision = routeLocalModels(message, history, { registry: localRegistry, policy })
+          const decision = routeLocalModels(message, history, { registry: availableLocal, policy })
           if (decision.modelIds.length > 0) {
-            const outputs = await orchestrateLocalModels(decision, message, { registry: localRegistry, history })
+            const outputs = await orchestrateLocalModels(decision, message, { registry: availableLocal, history })
             const result = strengthenLocalModels(message, outputs)
             if (result.answer.trim()) {
               // Baseline verify — this is another raw model-answer exit (same shape as
@@ -1988,6 +1991,7 @@ app.post('/api/chat', async (req, res) => {
           }
           // Ensemble produced nothing usable — fall through to the existing single-model path below.
         }
+      if (localInferenceAvailable) {
         // 2) Local-FM synthesis — corpus missed, still answer on-device, no external calls.
         const local = await callLocalModel(
           'You are Crucible, answering entirely on-device. Be accurate and direct. If you are unsure, say so plainly rather than inventing specifics.',
