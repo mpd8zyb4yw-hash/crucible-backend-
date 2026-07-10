@@ -104,7 +104,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| _(none — App.tsx lock RELEASED)_ | | A1 is done on branch `phase-a1-frontend`, typecheck-verified, awaiting a boot-test before merge (see §5). Whoever can run the app: boot-test it, then merge. | |
+| _(none — App.tsx lock RELEASED)_ | | **A1 MERGED to `main` 2026-07-10** (commit merged into the on-device stack) — opt-in ensemble + `ensemble:false` on-device default is now live. Boot-test happens when the user launches the electron app. | |
 | _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` | All on-device ensemble tracks landed & benched on branch `claude/crucible-on-device-9jju3x` (see §6, 2026-07-10 entries). No placeholders remain. Needs a boot-test + merge by whoever can run the app with real ONNX weights. | |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
