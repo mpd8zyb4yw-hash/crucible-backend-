@@ -1346,6 +1346,23 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — /api/diag: on-device pool block (localMode ensemble is now observable)
+
+The one-call `/api/diag` snapshot reported the external `MODEL_REGISTRY` and a one-line
+`localInference` field, but nothing about the on-device *ensemble* pool the `localMode` path fans
+out over — so there was no way to see, in one call, which local models are actually usable. Added
+an `onDevice` block (independently guarded like every other diag block, so it can never 500 the
+snapshot): `appleFmAvailable`, `poolSize`, the live `pool` (id/family/params/quality/installed/RAM
+for every model `getRegistry()` returns right now), and `onnxCandidates` (every SmolLM2/Gemma
+candidate with its repo + `installed` = whether its weights are cached) plus `onnxInstalled` count.
+
+This makes the whole Track A→B→C pipeline diagnosable from the debug snapshot the ROADMAP already
+tells operators to hit first. Verified the block logic against the real `getRegistry()` in
+isolation (can't boot the full server here — no `node_modules`): nothing-cached → `poolSize:1`
+(apple-fm only), all three ONNX candidates listed as not-installed; one repo cached → `poolSize:2`
+with that candidate flagged installed. Uses only symbols already imported/used in the adjacent
+`models` block, so no new dependency surface.
+
 ### 2026-07-10 — Track A: token-level streaming in the ONNX adapter
 
 The ONNX adapter (below) emitted one chunk per generation, so an on-device ONNX answer popped in

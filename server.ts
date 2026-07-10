@@ -22,7 +22,7 @@ import { registry } from './src/CrucibleEngine/tools/registry'
 import { resolveLocalIntent, runLocalPlan } from './src/CrucibleEngine/agent/localIntentRouter'
 import { localFmPlan, runFmPlan } from './src/CrucibleEngine/agent/localFmPlanner'
 import { corpusFirstAnswer } from './src/CrucibleEngine/corpus/corpusFirst'
-import { getRegistry as getLocalModelsRegistry } from './src/CrucibleEngine/localModels/registry'
+import { getRegistry as getLocalModelsRegistry, ONNX_CANDIDATES } from './src/CrucibleEngine/localModels/registry'
 import { route as routeLocalModels } from './src/CrucibleEngine/localModels/router'
 import { resolvePolicy as resolveLocalModelsPolicy } from './src/CrucibleEngine/localModels/policy'
 import { orchestrate as orchestrateLocalModels } from './src/CrucibleEngine/localModels/orchestrator'
@@ -4717,6 +4717,37 @@ app.get('/api/diag', (_req, res) => {
     }
   })
 
+  // On-device model pool (Track A/B/C) — what the localMode ensemble can actually fan out
+  // over right now, independent of the external MODEL_REGISTRY above. An ONNX candidate is
+  // "installed" only when its weights are cached on disk; uninstalled ones are listed so the
+  // snapshot shows what a user could pull, but they never enter the active pool.
+  const onDevice = block(() => {
+    const pool = getLocalModelsRegistry().map(m => ({
+      id: m.info.id,
+      family: m.info.family,
+      params: m.info.params,
+      quality: m.info.quality,
+      installed: m.info.installed,
+      residentRAMBytes: m.info.residentRAMBytes,
+    }))
+    const poolIds = new Set(pool.map(m => m.id))
+    const candidates = ONNX_CANDIDATES.map(c => ({
+      id: c.info.id,
+      repo: c.repo,
+      family: c.info.family,
+      params: c.info.params,
+      sizeBytes: c.info.sizeBytes,
+      installed: poolIds.has(c.info.id),
+    }))
+    return {
+      appleFmAvailable: localInferenceAvailable,
+      poolSize: pool.length,
+      pool,
+      onnxCandidates: candidates,
+      onnxInstalled: candidates.filter(c => c.installed).length,
+    }
+  })
+
   const errors = block(() => ({
     last10: debugBus.history(500)
       .filter(e => e.severity === 'error')
@@ -4727,7 +4758,7 @@ app.get('/api/diag', (_req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
     uptime: Math.round(process.uptime()),
-    pipeline, models, substrate, masterpiece, anima, corpus, errors,
+    pipeline, models, substrate, masterpiece, anima, corpus, onDevice, errors,
   })
 })
 
