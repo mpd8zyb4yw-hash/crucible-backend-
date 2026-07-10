@@ -121,6 +121,62 @@ export function verifyConsistency(synthesis: string, _question: string): VerifyR
   return { passed: issues.length === 0, issues, confidence: issues.length > 0 ? 0.6 : 0.3 }
 }
 
+// ── Code verifier — STATIC, high-precision "will this even run?" check ────────
+// Deliberately not an executor (the pipeline's sandbox/trace path handles real
+// execution). This catches the failures weak free models actually exhibit —
+// placeholder stubs, TODOs, ellipsis-in-place-of-code, and truncated/unclosed
+// blocks — deterministically and offline. It only claims a FAILURE when it is sure
+// (a placeholder cannot run); when the code merely looks complete it returns low
+// confidence, because a static read can't prove code runs — only execution can.
+const CODE_PLACEHOLDER_PATTERNS: RegExp[] = [
+  /\bTODO\b/i,
+  /\bFIXME\b/i,
+  /\byour code here\b/i,
+  /\bcode goes here\b/i,
+  /\b(implementation|logic) goes here\b/i,
+  /\b(add|insert|implement|write|fill in) (your |the )?(code|logic|implementation|body|rest)\b/i,
+  /\/\/\s*\.\.\.\s*(\(|rest|more|omitted|snip|etc|$)/im,   // `// ...` placeholder comment
+  /#\s*\.\.\.\s*(\(|rest|more|omitted|snip|etc|$)/im,      // `# ...` placeholder comment
+  /^\s*\.\.\.\s*$/m,                        // a bare `...` line (NOT a `...rest`/`[...arr]` operator, which has no surrounding whitespace)
+  /\brest of (the |your )?(code|implementation|logic|function|method)\b/i,
+  /<\s*(your|insert|add|implement)[^>]*>/i, // `<your code>`
+]
+
+function extractCodeBlocks(text: string): { blocks: string[]; unclosed: boolean } {
+  const fenceCount = (text.match(/```/g) ?? []).length
+  const blocks: string[] = []
+  const re = /```[a-zA-Z0-9+#._-]*\s*\n?([\s\S]*?)```/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) blocks.push(m[1])
+  return { blocks, unclosed: fenceCount % 2 === 1 }
+}
+
+export function verifyCode(synthesis: string, _question: string): VerifyResult {
+  const { blocks, unclosed } = extractCodeBlocks(synthesis)
+  const issues: string[] = []
+
+  if (unclosed) issues.push('the code block is never closed — the answer appears truncated mid-code and will not run')
+
+  const code = blocks.join('\n')
+  if (blocks.length === 0 && !unclosed) {
+    // No fenced code in a coding answer — can't judge runnability from a static read.
+    return { passed: true, issues: [], confidence: 0.1 }
+  }
+
+  for (const p of CODE_PLACEHOLDER_PATTERNS) {
+    if (p.test(code)) {
+      issues.push('the code contains a placeholder / TODO / ellipsis instead of a complete implementation — it will not run as-is')
+      break
+    }
+  }
+
+  // A confident failure (placeholder/truncation is unambiguously non-runnable) vs a
+  // static "looks complete" read we deliberately keep low-confidence — only real
+  // execution (the trace path) can certify a coding answer actually runs.
+  if (issues.length > 0) return { passed: false, issues, confidence: 0.75 }
+  return { passed: true, issues: [], confidence: 0.3 }
+}
+
 // ── Router — pick the right verifier for the prompt type ─────────────────────
 export async function domainVerify(
   promptType: string,
@@ -136,6 +192,8 @@ export async function domainVerify(
       case 'reasoning':
       case 'creative':
         return verifyConsistency(synthesis, question)
+      case 'coding':
+        return verifyCode(synthesis, question)
       default:
         return { passed: true, issues: [], confidence: 0 }
     }

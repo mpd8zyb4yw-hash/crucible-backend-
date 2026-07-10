@@ -1593,9 +1593,29 @@ hardened the patch id (`pp_${ts}_${stage}_${promptType}`) against same-milliseco
 multiple types are patched at once. `test-selfpatcher.ts` **42/42**: the coding patch targets
 execution, math targets the computation, neither clause leaks into a fuzzy type.
 
+**Follow-on — closed the fast-path coding gap with a STATIC verifier (no executor).** `domainVerify`
+fell through to a no-op for `coding`, so fast/simple/local coding answers got no ground-truth verdict
+and never got repaired or fed to the loop — the exact path that matters most for on-device work. Added
+`verifyCode` (a new `case 'coding'`): a deterministic, offline, high-precision "will this even run?"
+check that flags the failures weak free models actually produce — placeholder stubs, TODO/FIXME,
+comment/bare-line ellipsis, "rest of the implementation", and truncated/unclosed code blocks. It is
+NOT an executor (the sandbox/trace path owns real execution — the parallel session's lane); it only
+claims a **failure** when certain (a placeholder cannot run → confidence 0.75, drives repair +
+records a coding fast-path low), and returns **low** confidence (0.3) when the code merely looks
+complete — because a static read can't prove code runs, only execution can (so it never falsely
+claims `groundTruthVerified=true`; the trace still owns the positive verdict). Precision was the
+design priority: valid `...args` rest params, `[...a, ...b]` spreads, and `{ ...rest }` destructuring
+are explicitly NOT flagged. `test-domainverify-code.ts` **15/15**, including every spread/rest
+false-positive case. Pure `domainVerifiers.ts` — 0 overlap with the parallel session.
+
+**Also (cold-start):** strengthened the base code-synthesis prompt to demand runnable code (every
+import/definition present, no placeholder/TODO/ellipsis, handles the stated inputs) so weak models
+produce runnable code from request #1, before the loop has failures to learn from — the proactive
+complement to the learned `typeGuidance` refinement.
+
 **Session test coverage:** `test-selfpatcher.ts` 42 · `test-loopsignal.ts` 17 · `test-autoimprove.ts`
-9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 = **82 deterministic assertions**, all green,
-all no-network.
+9 · `test-history-revival.ts` 4 · `test-benchmarks.ts` 10 · `test-domainverify-code.ts` 15 = **97
+deterministic assertions**, all green, all no-network.
 
 **Verified-but-unchanged (for the other model's orientation):** the preference model is fully wired
 (train + consume); `preferenceModel.preferenceScore` is an unused dead export (weights are consumed
