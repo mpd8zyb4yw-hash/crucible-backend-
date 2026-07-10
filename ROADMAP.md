@@ -1346,6 +1346,20 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — End-to-end on-device ensemble bench + `npm run test:local`
+
+The per-module benches (router / onnx / strengthen) each cover one seam but nothing exercised the
+real `route() → orchestrate() → strengthen()` chain together — exactly the integration gap the June
+audit warned about (a change that passes every unit test but breaks the wiring between them). Added
+`localModels/__ensemble_bench.ts`: canned multi-family stub models driven through the actual
+pipeline, asserting the whole-system behaviors — all-mode consensus picks the corroborated answer
+over an outlier and credits only the agreeing models; auto-mode routes a family-diverse multi-model
+subset that still reaches consensus; a throwing model degrades to `ok:false` without blocking the
+survivors' consensus; single-mode is a clean passthrough; and a fully-failed pool yields an empty
+zero-confidence result instead of throwing. 13 assertions, all pass. Added `npm run test:local` to
+run all four on-device benches (router + onnx + strengthen + ensemble) in one command, so the whole
+track is one line to re-verify before any future change to `localModels/`.
+
 ### 2026-07-10 — On-device ensemble auto-engages when >1 local model is installed
 
 Until now the multi-model on-device consensus fired ONLY on an explicit `localMode:'all'|'single'`

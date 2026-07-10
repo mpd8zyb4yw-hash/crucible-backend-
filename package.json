@@ -8,6 +8,7 @@
     "dev": "concurrently \"npx tsx server.ts\" \"npx vite\"",
     "server": "tsx server.ts",
     "smoke": "tsx src/CrucibleEngine/smoke-benchmarks.ts",
+    "test:local": "tsx src/CrucibleEngine/localModels/__router_bench.ts && tsx src/CrucibleEngine/localModels/__onnx_bench.ts && tsx src/CrucibleEngine/localModels/strengthen/__strengthen_bench.ts && tsx src/CrucibleEngine/localModels/__ensemble_bench.ts",
     "diag": "curl -s http://localhost:3001/api/diag | python3 -m json.tool",
     "build": "tsc -b && vite build",
     "build:app": "bash setup-crucible.sh",
