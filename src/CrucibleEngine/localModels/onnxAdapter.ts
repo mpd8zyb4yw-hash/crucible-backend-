@@ -14,10 +14,14 @@
 
 import type { LocalModel, LocalModelInfo } from './contracts'
 
-/** Minimal shape we use from a transformers.js text-generation pipeline. */
+/** Minimal shape we use from a transformers.js text-generation pipeline.
+ *  `onToken`, when provided, is called with each decoded token as it streams — the default
+ *  loader wires it to a transformers.js TextStreamer; a generator that ignores it simply runs
+ *  non-streaming and the adapter falls back to emitting the final text as one chunk. */
 export type OnnxGenerator = (
   input: unknown,
   opts: Record<string, unknown>,
+  onToken?: (token: string) => void,
 ) => Promise<unknown>
 
 export interface OnnxDeps {
@@ -95,9 +99,17 @@ async function defaultLoadGenerator(repo: string): Promise<OnnxGenerator | null>
   if (!pending) {
     pending = (async () => {
       try {
-        const { pipeline } = await import('@xenova/transformers')
+        const mod = await import('@xenova/transformers')
+        const { pipeline } = mod
+        const TextStreamer = (mod as any).TextStreamer
         const gen = await pipeline('text-generation', repo, { quantized: true })
-        return ((input, opts) => (gen as any)(input, opts)) as OnnxGenerator
+        return ((input, opts, onToken) => {
+          let streamer: unknown
+          if (onToken && TextStreamer) {
+            streamer = new TextStreamer((gen as any).tokenizer, { skip_prompt: true, callback_function: onToken })
+          }
+          return (gen as any)(input, streamer ? { ...opts, streamer } : opts)
+        }) as OnnxGenerator
       } catch {
         _deadRepos.add(repo)
         return null
@@ -114,22 +126,62 @@ export function createOnnxModel(spec: OnnxModelSpec, deps?: Partial<OnnxDeps>): 
   const maxNewTokens = spec.maxNewTokens ?? 512
   const temperature = spec.temperature ?? 0.7
 
-  async function runGeneration(prompt: string, history: { user: string; assistant: string }[], signal?: AbortSignal): Promise<string> {
-    if (signal?.aborted) return ''
+  // Streams tokens as they decode: a push (TextStreamer callback) → pull (async iterator)
+  // bridge with a simple queue + one-slot waiter. If the generator never streams a token
+  // (a non-streaming engine, or no TextStreamer), the final returned text is emitted as one
+  // chunk instead — so downstream (which just concatenates chunks) is identical either way.
+  async function* streamGeneration(
+    prompt: string,
+    history: { user: string; assistant: string }[],
+    signal?: AbortSignal,
+  ): AsyncGenerator<string> {
+    void now // reserved for latency instrumentation; keeps the dep injectable
+    if (signal?.aborted) return
     const gen = await loadGenerator(spec.repo)
-    if (!gen) return ''
+    if (!gen) return
     const messages = buildMessages(prompt, history)
+
+    const queue: string[] = []
+    let wake: (() => void) | null = null
+    let finished = false
+    let streamedAny = false
+    const bump = () => { if (wake) { const w = wake; wake = null; w() } }
+
+    const onToken = (token: string) => {
+      if (signal?.aborted || !token) return
+      queue.push(token)
+      streamedAny = true
+      bump()
+    }
+
+    const run = (async () => {
+      try {
+        const raw = await gen(
+          messages,
+          { max_new_tokens: maxNewTokens, temperature, do_sample: temperature > 0, return_full_text: false, signal },
+          onToken,
+        )
+        // Non-streaming fallback: nothing pushed via onToken → emit the extracted final text.
+        if (!streamedAny && !signal?.aborted) {
+          const text = extractGeneratedText(raw, prompt)
+          if (text) queue.push(text)
+        }
+      } catch {
+        // swallow — a failed generation simply yields whatever streamed before the throw
+      } finally {
+        finished = true
+        bump()
+      }
+    })()
+
     try {
-      const raw = await gen(messages, {
-        max_new_tokens: maxNewTokens,
-        temperature,
-        do_sample: temperature > 0,
-        return_full_text: false,
-      })
-      if (signal?.aborted) return ''
-      return extractGeneratedText(raw, prompt)
-    } catch {
-      return ''
+      while (true) {
+        if (queue.length > 0) { yield queue.shift()!; continue }
+        if (finished || signal?.aborted) break
+        await new Promise<void>(res => { wake = res })
+      }
+    } finally {
+      await run // never leave the generation promise dangling
     }
   }
 
@@ -141,21 +193,7 @@ export function createOnnxModel(spec: OnnxModelSpec, deps?: Partial<OnnxDeps>): 
       return gen != null
     },
     generate(prompt, opts) {
-      const history = opts?.history ?? []
-      return {
-        [Symbol.asyncIterator]() {
-          let done = false
-          return {
-            async next() {
-              if (done) return { done: true, value: undefined as any }
-              done = true
-              void now // reserved for future latency instrumentation; keeps dep injectable
-              const text = await runGeneration(prompt, history, opts?.signal)
-              return { done: false, value: text }
-            },
-          }
-        },
-      }
+      return streamGeneration(prompt, opts?.history ?? [], opts?.signal)
     },
   }
 }

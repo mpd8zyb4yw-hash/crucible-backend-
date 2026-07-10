@@ -1346,6 +1346,33 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-10 — Track A: token-level streaming in the ONNX adapter
+
+The ONNX adapter (below) emitted one chunk per generation, so an on-device ONNX answer popped in
+all at once instead of streaming like the external pipeline. Added real token streaming: a
+push→pull bridge in `onnxAdapter.ts` that wires transformers.js's `TextStreamer` callback
+(`skip_prompt: true`, `callback_function`) into the adapter's async iterator via a small
+queue + one-slot waiter. Each decoded token is yielded as its own chunk, so the existing
+chunk-concatenating consumers stream it live with no change on their side.
+
+Kept fully general and offline-benchable:
+- The token callback is the optional 3rd arg of the injectable `OnnxGenerator`, so streaming is
+  exercised with a fake engine (no weights). Existing 2-arg fakes still work — they just don't
+  stream and hit the fallback path.
+- **Non-streaming fallback:** if a generator never calls `onToken` (or no `TextStreamer` exists),
+  the adapter emits the extracted final text as one chunk — downstream output is identical either
+  way, so no engine variant breaks.
+- **No duplication:** when tokens stream, the generator's returned value is NOT also emitted.
+- **Abort mid-stream terminates cleanly:** the waiter is always woken by the run's `finally`, so
+  iteration can't hang; a caller that aborts after the first token gets exactly what streamed
+  before the abort.
+
+Bench `__onnx_bench.ts` grew to 19 assertions (+4: ordered streamed chunks, non-streaming
+single-chunk fallback, no-duplication, mid-stream abort) — all pass. Router + strengthen benches
+still green. Same environmental-only typecheck situation as the prior entries (no `node_modules`
+in this container). Real-weights streaming still can't be driven here (no model cache/egress), but
+the bridge logic is fully covered by the fake-engine bench.
+
 ### 2026-07-10 — Track A: real ONNX text-gen adapter + health-aware registry (last placeholder gone)
 
 Follow-up to Track C below. The on-device ensemble's `registry.ts` was the last provisional

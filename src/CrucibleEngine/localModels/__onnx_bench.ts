@@ -17,6 +17,12 @@ async function drain(it: AsyncIterable<string>): Promise<string> {
   return out
 }
 
+async function collect(it: AsyncIterable<string>): Promise<string[]> {
+  const chunks: string[] = []
+  for await (const c of it) chunks.push(c)
+  return chunks
+}
+
 const info: LocalModelInfo = {
   id: 'test-onnx', family: 'smollm', params: 1, provider: 'local', quality: 5,
   fit: { coding: 5, reasoning: 5, creative: 5, factual: 5, math: 5, general: 5 },
@@ -53,6 +59,37 @@ function main() {
     assert(Array.isArray(seenInput) && seenInput[seenInput.length - 1].content === 'the question',
       'adapter passes a chat message list ending in the user prompt')
     assert((await model.health()) === true, 'health is true when the generator loads')
+
+    // ── streaming: tokens pushed via onToken arrive as separate chunks, in order ──
+    const streamGen: OnnxGenerator = async (_input, _opts, onToken) => {
+      for (const tok of ['Hello', ', ', 'on-device', ' world']) onToken?.(tok)
+      return [{ generated_text: [{ role: 'assistant', content: 'IGNORED-final' }] }]
+    }
+    const streamModel = createOnnxModel(spec, { loadGenerator: async () => streamGen })
+    const chunks = await collect(streamModel.generate('hi'))
+    assert(chunks.length === 4 && chunks.join('') === 'Hello, on-device world',
+      'streamed tokens arrive as ordered chunks and concatenate to the full reply')
+    assert(!chunks.join('').includes('IGNORED-final'),
+      'when tokens stream, the returned value is not also emitted (no duplication)')
+
+    // ── non-streaming engine: no onToken calls -> final text emitted as one chunk ──
+    const nonStream: OnnxGenerator = async () => [{ generated_text: 'just the final text' }]
+    const nsModel = createOnnxModel(spec, { loadGenerator: async () => nonStream })
+    const nsChunks = await collect(nsModel.generate('hi'))
+    assert(nsChunks.length === 1 && nsChunks[0] === 'just the final text',
+      'a non-streaming engine falls back to a single final chunk')
+
+    // ── abort mid-stream: iteration terminates, doesn't hang on the waiter ──
+    const midAc = new AbortController()
+    const midGen: OnnxGenerator = async (_i, _o, onToken) => {
+      onToken?.('first ')
+      midAc.abort()          // caller aborts after the first token
+      onToken?.('second')    // dropped: onToken sees the abort
+      return null
+    }
+    const midModel = createOnnxModel(spec, { loadGenerator: async () => midGen })
+    const midChunks = await collect(midModel.generate('hi', { signal: midAc.signal }))
+    assert(midChunks.join('') === 'first ', 'aborting mid-stream stops after the in-flight token and terminates')
 
     // ── unavailable: loader returns null (weights not cached) -> empty + unhealthy ──
     const dead = createOnnxModel(spec, { loadGenerator: async () => null })
