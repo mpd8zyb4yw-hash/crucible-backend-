@@ -56,9 +56,42 @@ function main() {
   assert(split.method === 'central-low-agreement', `disjoint outputs report low agreement (got ${split.method})`)
   assert(split.confidence <= 0.6, `a split pool does not manufacture high confidence (got ${split.confidence})`)
 
+  // ── contested numeric answer: models disagree on THE number -> flagged + damped ──
+  // The old code scored this as 0.5 "agreement" and still RAISED confidence. It must now
+  // be recognized as a disagreement and drop below the normal floor.
+  const contested = strengthen('how many moons does jupiter have', [
+    out('m1', 'Jupiter has 79 moons.'),
+    out('m2', 'Jupiter has 95 moons.'),
+    out('m3', 'The answer is 88 moons.'),
+  ])
+  assert(contested.method === 'contested-numeric', `disagreeing numbers report contested-numeric (got ${contested.method})`)
+  assert(contested.confidence < 0.5, `a contested numeric answer falls below the free-tier floor (got ${contested.confidence})`)
+
+  // ── lone dissenter on a factual number is still flagged (2 agree, 1 differs) ──
+  const dissent = strengthen('how many r in strawberry', [
+    out('m1', 'There are 3 r in strawberry.'),
+    out('m2', 'Strawberry has 3 r.'),
+    out('m3', 'Strawberry has 2 r.'),
+  ])
+  assert(dissent.method === 'contested-numeric', `a 2-vs-1 numeric split is flagged (got ${dissent.method})`)
+  assert(dissent.confidence < salient.confidence, 'a split answer earns less confidence than the unanimous one')
+
+  // ── incidental numbers in prose must NOT trigger a false contradiction ──
+  // Both agree on the concept; the differing incidental numbers (year vs height) are not
+  // short-answer payloads, so no contested flag.
+  const prose = strengthen('describe the eiffel tower', [
+    out('m1', 'The Eiffel Tower is a wrought-iron lattice tower in Paris built for the 1889 World Fair as its centerpiece attraction.'),
+    out('m2', 'A wrought-iron lattice tower in Paris, the Eiffel Tower stands 330 meters tall and draws millions of visitors each year.'),
+  ])
+  assert(prose.method !== 'contested-numeric', `incidental prose numbers do not manufacture a contradiction (got ${prose.method})`)
+
   // ── confidence is always within the free-tier corroboration band ──
   for (const r of [one, consensus, salient, split]) {
     assert(r.confidence >= 0.5 && r.confidence <= 0.9, `confidence stays in [0.5,0.9] (got ${r.confidence})`)
+  }
+  // contested results may (intentionally) dip below the normal floor, but never below 0.3
+  for (const r of [contested, dissent]) {
+    assert(r.confidence >= 0.3 && r.confidence < 0.5, `contested confidence in [0.3,0.5) (got ${r.confidence})`)
   }
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
