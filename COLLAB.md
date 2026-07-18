@@ -210,6 +210,42 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   If you ever need `modelRegistry.ts`'s `classifyPrompt()` shape while I'm routing, ping here — but
   I don't expect to touch it. **Stop-orienting checkpoint:** roadmap + claims are now truthful;
   both lanes are backend/model; let's build.
+- **[Agent B · 2026-07-18 · @Agent A — WORKFLOW SYNC: how do we hand off the one shared seam?]**
+  Justin asked us to converge on next steps via this doc (he's relaying between both instances).
+  Here's my state + the one real coupling that needs a joint decision.
+
+  **Shipped on my lane (`feat/consensus-synthesis`, all pure/offline, `test:local` 4/4):**
+    1. `numericConsensus` — split numbers (79 vs 95 moons) now damp confidence below the floor +
+       report `contested-numeric` instead of silently averaging to 0.5 and *raising* it. (PR #5)
+    2. `categoricalConsensus` (commit `b7e7d55`, pushed to the same branch) — extends that to short
+       **yes/no** (polarity read from raw text, since `contentTokens` stops "no"/"not") and
+       **single-entity** answers ("Paris" vs "London") → `contested-categorical`. Guarded to ≤8-word
+       replies so prose isn't a false split.
+
+  **The coupling I can't resolve alone — it lands in YOUR `server.ts` lock.** The strengthener now
+  emits a real honest-uncertainty signal (`method: 'contested-*'`, damped `confidence`), but the A0
+  chat handler in `server.ts` **discards `StrengthenResult.method`** — it only forwards `answer`.
+  So the contradiction detection is invisible to the user today. Surfacing it (e.g. a short
+  "⚠ on-device models disagreed (79 vs 95) — treat as uncertain" prefix, or a `meta.contested`
+  field on the SSE payload) is a ~10-line edit at ONE site in `server.ts` — squarely inside your
+  reliability lane and your lock.
+
+  **Proposal (pick one, reply here):**
+    • **A — you wire it** as part of your `server.ts` pass (I think cleanest: one owner for that
+      file, no lock handoff). I'll hand you the exact `StrengthenResult` field contract + a copy-paste
+      snippet so it's mechanical. My `strengthen` output shape is frozen and won't move.
+    • **B — brief lock handoff:** you pause, I take `server.ts` for one surgical commit to add the
+      surfacing + a bench, then return the lock. Slower, more contention risk.
+
+  I recommend **A**. Meanwhile I'll keep widening detection on my side with zero `server.ts` touch:
+  next candidate is **near-miss numeric contradiction** (95 vs 79 is contested; 95 vs 95.2 is
+  agreement, not conflict — currently exact-string, so "3.0" vs "3" falsely splits). Independent of
+  the seam, so I can land it regardless of A/B.
+
+  **Open Qs for you:** (1) A or B? (2) For surfacing — inline text prefix, or a structured
+  `meta.contested` field on the payload (my vote: structured, so the UI decides presentation)?
+  (3) Any merge-order dependency between your `yozsom` reliability work and PR #5 I should know
+  about before Justin merges? — *Agent B, 2026-07-18*
 
 ---
 
