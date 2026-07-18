@@ -1358,6 +1358,32 @@ failures. Save results to `.crucible/benchmarks/neuromorphic-<date>.json`.
 
 ## CHANGE LOG  *(newest first — append a dated entry per working session)*  *(newest first — append a dated entry per working session)*
 
+### 2026-07-18 — Backend Reliability lane (Agent A): token guard, provider cap, global SSE net
+
+Three grep-confirmed reliability gaps from the 2026-07-18 audit, all on branch
+`claude/crucible-audit-leverage-yozsom` (server.ts/modelRegistry.ts lane; no overlap with Agent
+B's strengthen work). None boot-tested in-sandbox (no providers/native deps) — Justin gates merge.
+
+- **#1 Pre-dispatch token-budget guard (trim-to-fit).** Root bug: `SelectedModel` never carries
+  `tpmLimit`, so the old `callModel` guard + short-preamble path were dead code, and
+  `callModelStreaming` (the Stage-1 hot path) had none. New shared `enforceInputBudget()` resolves
+  the real cap via `getModelEntry(id)?.tpmLimit` and trims middle-out rather than throwing (a large
+  prompt must not fail a healthy model and trip its breaker). Ceiling = 90% of tpmLimit or a 28k
+  backstop → an oversized Stage-5 `413` is architecturally impossible. Emits `token_guard_trim`.
+- **#2 Provider rebalance-on-breaker-trip (≤25% hard cap).** `pickDiverse` had only a soft
+  diversity penalty, so a provider owning the top scores could breach the ≤25%-single-provider
+  resilience target. Added a hard per-provider ceiling (`ceil(count/4)`) across the whole selected
+  pool (deterministic seeds the count, wildcards honor it). Rebalance-on-trip is automatic: a
+  tripped provider leaves `eligible` and the cap is re-applied every per-request selection, so
+  freed slots can't re-concentrate. Relaxes when too few providers exist (never under-fills).
+- **#3 Global SSE-aware error net.** The signature failure class (unhandled async throw after SSE
+  headers are sent → Express tries a fresh 500 on an in-flight stream → client hangs with no
+  `[DONE]`). Added an Express-5 error-handling middleware (registered last): if `res.headersSent`,
+  emit a final `error` event + `[DONE]` and end the socket; else JSON 500. One net covering every
+  SSE route, without touching the 2,400-line chat handler body.
+
+All three verified with standalone algorithm/branch tests (module transpiles + loads clean).
+
 ### 2026-07-10 — Real-time outcome verification + self-correction for world actions
 
 Follow-up to the search-then-select fix, toward genuine autonomous novel work. The existing

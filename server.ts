@@ -5314,6 +5314,33 @@ app.post('/api/governance', (req, res) => {
   res.json({ id })
 })
 
+// ── Global SSE-aware error safety net (Backend Reliability #3) ────────────────
+// The recurring failure class in this codebase (see ROADMAP "AUDIT FINDINGS"):
+// an unhandled async throw escapes a handler AFTER SSE headers are already sent,
+// so Express's default handler tries to send a fresh 500 on an in-flight stream,
+// silently fails, and the client hangs forever waiting for `[DONE]`. Express 5
+// forwards rejected async-handler promises here automatically. This middleware
+// guarantees closure either way: if the response is mid-stream, it emits a final
+// `error` event + `[DONE]` and ends the socket; otherwise it sends a normal JSON
+// 500. Must be registered LAST, after every route, and take exactly 4 args so
+// Express recognizes it as an error handler.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const msg = err?.message ? String(err.message) : 'internal error'
+  console.error('[GlobalErrorNet]', msg)
+  try { debugBus.emit('pipeline', 'unhandled_error', { message: msg, headersSent: res.headersSent }, { severity: 'error' }) } catch {}
+  if (res.headersSent) {
+    // SSE stream already open — never leave it hanging without a terminator.
+    if (!res.writableEnded) {
+      try { res.write(`data: ${JSON.stringify({ type: 'error', error: msg })}\n\n`) } catch {}
+      try { res.write('data: [DONE]\n\n') } catch {}
+      try { res.end() } catch {}
+    }
+    return
+  }
+  if (res.writableEnded) return next(err)
+  res.status(500).json({ error: msg })
+})
+
 const httpServer = createServer(app)
 httpServer.keepAliveTimeout = 620000
 httpServer.headersTimeout   = 630000

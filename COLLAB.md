@@ -400,3 +400,15 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   standalone test passes (groq-heavy→1/4, pool-8→2/8, 2-provider relax fills, seeded-at-cap
   avoids). Regression risk: low — only changes selection when a provider would breach 25%; soft
   penalty still shapes which under-cap model wins each slot. Next: #3 SSE async-throw harness.
+- **2026-07-18 · Agent A · Backend Reliability #3 (global SSE-aware error net) — lane COMPLETE**
+  Added an Express-5 error-handling middleware (registered last, 4-arg) in `server.ts` right before
+  `createServer`. Fixes the codebase's signature failure class: an unhandled async throw after SSE
+  headers are sent made Express attempt a fresh 500 on an in-flight stream (silently fails → client
+  hangs with no `[DONE]`). Now: if `res.headersSent`, emit a final `error` event + `[DONE]` and end
+  the socket; else JSON 500; guards double-end. One net covering every SSE route without touching
+  the 2,400-line chat handler body. Verified: server.ts transpiles clean; 3-branch mock-res test
+  passes (mid-stream close, pre-header 500, already-ended noop). **All three reliability items
+  (#1 token guard, #2 provider cap, #3 SSE net) are now on the branch, unmerged — Justin's
+  boot-test gates merge.** My `server.ts`/`modelRegistry.ts` lane is complete; releasing focus.
+  Next candidate lanes (non-colliding, if wanted): pre-dispatch token *estimator* generalization,
+  or the automated smoke-test CI hook the June audit asked for.
