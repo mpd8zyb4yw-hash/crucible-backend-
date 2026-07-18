@@ -776,24 +776,47 @@ export function familyOf(m: { family?: string; id?: string; label?: string }): s
  */
 function pickDiverse<T extends { id: string; label: string; provider: string; score: number; family?: string }>(
   candidates: T[],
-  count: number
+  count: number,
+  // Hard per-provider cap (correlated-failure defense — ROADMAP resilience target:
+  // "no single provider exceeding 25% of the active pool"). Defaults to 25% of the
+  // pool this selection is filling. The soft diversity penalty below still shapes
+  // *which* under-cap model wins each slot; the cap is the absolute ceiling that the
+  // soft penalty alone does not guarantee when one provider owns the top scores.
+  maxPerProvider = Math.max(1, Math.ceil(count / 4)),
+  // Provider picks already made outside this call (e.g. by a prior deterministic
+  // pass) so the cap spans the whole selected pool, not just this call's slice.
+  seedProviderCount: Record<string, number> = {},
 ): T[] {
   const picked: T[] = []
   const remaining = [...candidates]
-  const providerCount: Record<string, number> = {}
+  const providerCount: Record<string, number> = { ...seedProviderCount }
   const familyCount: Record<string, number> = {}
 
   while (picked.length < count && remaining.length) {
-    let bestIdx = 0
+    let bestIdx = -1
     let bestAdj = -Infinity
+    // Pass 1 — honor the hard cap: only consider providers still under the ceiling.
     for (let i = 0; i < remaining.length; i++) {
       const m = remaining[i]
+      if ((providerCount[m.provider] ?? 0) >= maxPerProvider) continue
       const pSeen = providerCount[m.provider] ?? 0
       const fSeen = familyCount[familyOf(m)] ?? 0
       // Each repeat of a provider costs 18%, each repeat of a family costs 10%.
       const diversityMult = Math.pow(0.82, pSeen) * Math.pow(0.90, fSeen)
       const adj = m.score * diversityMult
       if (adj > bestAdj) { bestAdj = adj; bestIdx = i }
+    }
+    // Pass 2 — relax: every remaining candidate's provider is at cap but we still
+    // owe slots (too few distinct providers available). Fill from the best remaining
+    // rather than return an under-sized pool — a degraded pool beats an empty one.
+    if (bestIdx === -1) {
+      for (let i = 0; i < remaining.length; i++) {
+        const m = remaining[i]
+        const pSeen = providerCount[m.provider] ?? 0
+        const fSeen = familyCount[familyOf(m)] ?? 0
+        const adj = m.score * Math.pow(0.82, pSeen) * Math.pow(0.90, fSeen)
+        if (adj > bestAdj) { bestAdj = adj; bestIdx = i }
+      }
     }
     const [chosen] = remaining.splice(bestIdx, 1)
     picked.push(chosen)
@@ -854,9 +877,22 @@ export function selectModels(
 
   if (eligible.length === 0) throw new Error('No eligible models available')
 
+  // Hard per-provider cap spanning the WHOLE selected pool (deterministic +
+  // wildcard), not just the deterministic slice — ROADMAP resilience target of
+  // ≤25% single-provider share. When a provider's breaker trips, its models drop
+  // out of `eligible` above and this cap prevents the freed slots from
+  // re-concentrating on the next-loudest provider: automatic rebalance-on-trip,
+  // re-applied on every per-request selection.
+  const maxPerProvider = Math.max(1, Math.ceil(parallelCount / 4))
+
   // Top N deterministic slots — diversity-maximised so the selection never
   // concentrates on one provider/family (correlated-failure defense, Track Q).
-  const deterministic = pickDiverse(eligible, deterministicCount)
+  const deterministic = pickDiverse(eligible, deterministicCount, maxPerProvider)
+
+  // Track provider usage from the deterministic pass so wildcards keep the pool
+  // under the same cap.
+  const providerCount: Record<string, number> = {}
+  for (const m of deterministic) providerCount[m.provider] = (providerCount[m.provider] ?? 0) + 1
 
   // Remaining pool for wildcard slots — weighted random by quality
   const detIds = new Set(deterministic.map(m => m.id))
@@ -864,14 +900,19 @@ export function selectModels(
   const wildcards: typeof eligible = []
 
   for (let i = 0; i < wildcardCount && pool.length > 0; i++) {
-    const totalWeight = pool.reduce((s, m) => s + m.quality, 0)
+    // Prefer providers still under the cap; only fall back to at-cap providers if
+    // every remaining candidate is capped (keeps the wildcard slot filled).
+    let draw = pool.filter(m => (providerCount[m.provider] ?? 0) < maxPerProvider)
+    if (draw.length === 0) draw = pool
+    const totalWeight = draw.reduce((s, m) => s + m.quality, 0)
     let rand = Math.random() * totalWeight
-    let picked = pool[pool.length - 1]
-    for (const m of pool) {
+    let picked = draw[draw.length - 1]
+    for (const m of draw) {
       rand -= m.quality
       if (rand <= 0) { picked = m; break }
     }
     wildcards.push(picked)
+    providerCount[picked.provider] = (providerCount[picked.provider] ?? 0) + 1
     pool.splice(pool.indexOf(picked), 1)  // no duplicates
   }
 

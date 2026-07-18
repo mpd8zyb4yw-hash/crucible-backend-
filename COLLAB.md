@@ -388,3 +388,15 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   boot the live pipeline here (no providers/deps) — needs Justin's boot-test before merge.
   Regression risk: low/additive — only shrinks oversized payloads, never touches in-budget ones.
   Next in lane: #2 provider rebalance-on-breaker-trip.
+- **2026-07-18 · Agent A · Backend Reliability #2 (provider rebalance-on-trip / ≤25% cap) on branch
+  `claude/crucible-audit-leverage-yozsom`** — `pickDiverse` in `modelRegistry.ts` used only a SOFT
+  diversity penalty (0.82^n per provider repeat), so a provider owning the top scores could still
+  exceed the ROADMAP's ≤25%-single-provider resilience target. Added a HARD per-provider cap
+  (default `ceil(count/4)`) spanning the whole selected pool: the deterministic pass seeds the
+  provider counts and the wildcard loop honors the same ceiling. Rebalance-on-trip falls out for
+  free — a tripped provider's models leave `eligible`, and the cap is re-applied on every
+  per-request selection so freed slots can't re-concentrate. Relaxes when too few distinct
+  providers exist (never under-fills). Verified: modelRegistry transpiles + loads clean; 4-case
+  standalone test passes (groq-heavy→1/4, pool-8→2/8, 2-provider relax fills, seeded-at-cap
+  avoids). Regression risk: low — only changes selection when a provider would breach 25%; soft
+  penalty still shapes which under-cap model wins each slot. Next: #3 SSE async-throw harness.

@@ -91,8 +91,14 @@ audit is the first time the real pipeline has actually run end-to-end on a real 
 - **[~] Provider resilience target** — minimum 6 distinct providers, no single provider exceeding
   25% of the active pool, automatic rebalancing when a provider trips its circuit breaker.
   Candidate providers to add: Together AI, Cerebras, Cohere, Perplexity API, Fireworks AI, Deep
-  Infra. *(This session: 5 providers wired into the registry + a generic OpenAI-compatible
-  transport. Automatic rebalancing-on-trip not yet built.)*
+  Infra. *(2026-07-18: **≤25%-single-provider cap + rebalance-on-trip now enforced.** `pickDiverse`
+  gained a hard per-provider ceiling (default `ceil(count/4)` = 25%) on top of the existing soft
+  diversity penalty, applied across the WHOLE selected pool — deterministic pass seeds the count,
+  the wildcard loop honors it. A tripped provider's models drop out of `eligible`, and because the
+  cap is re-applied on every per-request selection, freed slots can't re-concentrate on the
+  next-loudest provider — that IS the automatic rebalance-on-trip. Relaxes gracefully when too few
+  distinct providers exist, so the pool is never under-filled. Verified with a 4-case standalone
+  test. Still open: reaching ≥6 live providers depends on keys being present.)*
 - **[~] Automated smoke-test CI** — run the benchmark suite automatically at the start/end of every
   significant implementation session, before marking any track complete. This audit found a
   pipeline-breaking TDZ bug that sat undetected for hours; a 2-minute smoke test after each session
