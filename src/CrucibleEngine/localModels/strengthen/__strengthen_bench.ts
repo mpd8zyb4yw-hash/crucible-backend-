@@ -85,6 +85,31 @@ function main() {
   ])
   assert(prose.method !== 'contested-numeric', `incidental prose numbers do not manufacture a contradiction (got ${prose.method})`)
 
+  // ── near-miss numeric: pure formatting difference ("3" vs "3.0") is NOT a contradiction ──
+  const fmt = strengthen('how many r in strawberry', [
+    out('m1', '3'),
+    out('m2', '3.0'),
+    out('m3', '3'),
+  ])
+  assert(fmt.method !== 'contested-numeric', `"3" vs "3.0" is agreement, not a split (got ${fmt.method})`)
+  assert(fmt.confidence >= 0.7, `formatting-equal numbers still earn the salient boost (got ${fmt.confidence})`)
+
+  // ── tolerance: values within 1% collapse to one, so a rounding gap is not contested ──
+  const roundish = strengthen('pi to two places', [
+    out('m1', '3.14'),
+    out('m2', '3.141'),
+    out('m3', '3.14'),
+  ])
+  assert(roundish.method !== 'contested-numeric', `near-equal numbers within tolerance are not contested (got ${roundish.method})`)
+
+  // ── genuine spread beyond tolerance is STILL flagged (guards against over-collapsing) ──
+  const realSplit = strengthen('how many moons does saturn have', [
+    out('m1', '83'),
+    out('m2', '146'),
+    out('m3', '83'),
+  ])
+  assert(realSplit.method === 'contested-numeric', `a real >1% split is still flagged (got ${realSplit.method})`)
+
   // ── contested yes/no: models split on polarity -> flagged + damped ──
   const yesno = strengthen('is 51 a prime number', [
     out('m1', 'Yes.'),

@@ -83,19 +83,35 @@ function agreement(a: { toks: Set<string>; bis: Set<string> }, b: { toks: Set<st
  *      "5" scored 0.5 and still *raised* confidence. A contested factual number must instead
  *      LOWER confidence and be surfaced, so the ensemble reports honest uncertainty.
  */
+// Two numeric answers count as the SAME value when within this relative tolerance. Cheap models
+// round and format differently ("3" vs "3.0", "95" vs "95.2") — treating those as a contradiction
+// would manufacture false uncertainty. A genuine disagreement (79 vs 95) is far outside 1%.
+const NUM_TOL = 0.01
+function numClose(a: number, b: number): boolean {
+  return Math.abs(a - b) <= NUM_TOL * Math.max(1, Math.abs(a), Math.abs(b))
+}
+
 function numericConsensus(prepped: { tokens: string[] }[]): { agreement: number; contested: boolean } {
   const answers = prepped
     .map(p => ({ short: p.tokens.length <= 12, nums: new Set(p.tokens.filter(t => /^\d+(\.\d+)?$/.test(t))) }))
     .filter(a => a.short && a.nums.size === 1)
-    .map(a => [...a.nums][0])
+    .map(a => parseFloat([...a.nums][0]))
+    .filter(v => Number.isFinite(v))
   if (answers.length < 2) return { agreement: 0, contested: false }
-  const counts = new Map<string, number>()
-  for (const v of answers) counts.set(v, (counts.get(v) ?? 0) + 1)
-  const top = Math.max(...counts.values())
+  // Agreement is measured with tolerance, not exact string equality: the largest set of answers
+  // that are mutually within NUM_TOL of a common value.
+  let top = 0
+  for (const anchor of answers) {
+    const near = answers.filter(v => numClose(v, anchor)).length
+    if (near > top) top = near
+  }
   const agreement = top / answers.length
-  // Contested = real spread with no strong (>=75%) majority. A lone dissenter on a factual
-  // number is worth flagging — for on-device models it usually means one of them is wrong.
-  const contested = counts.size >= 2 && agreement < 0.75
+  // Distinct clusters via a greedy tolerance pass — "3.0" and "3" collapse to one, so a formatting
+  // difference is not counted as a second value.
+  const reps: number[] = []
+  for (const v of answers) if (!reps.some(r => numClose(r, v))) reps.push(v)
+  // Contested = a real spread (>=2 tolerance-distinct values) with no strong (>=75%) majority.
+  const contested = reps.length >= 2 && agreement < 0.75
   return { agreement, contested }
 }
 
