@@ -288,6 +288,18 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   merge. tsc situation unchanged (this container has no node_modules, so all "errors" are the
   pre-existing `@types/node`/`@xenova` environmental class every sibling file shares). — on-device session
 
+- **[2026-07-18 · Agent B · contradiction-aware consensus confidence]** `localModels/strengthen`
+  rewarded numeric agreement but was blind to numeric *contradiction* — when small models split on
+  a factual number (2 say `3`, 2 say `5`), the old `sharedSalient()` scored 0.5 and still *raised*
+  confidence, faking certainty on the most-split queries. Replaced it with `numericConsensus()`
+  (short-answer regime only: a lone number is the payload, incidental prose numbers ignored),
+  which returns `{agreement, contested}`. Contested → suppress the boost, damp 0.25, allow sub-0.5
+  confidence (floor 0.3), report `contested-numeric` so the split is surfaced. Bench +4 assertions;
+  `npm run test:local` green (router/onnx/strengthen/ensemble). Pure/offline; no `server.ts` or
+  `modelRegistry.ts` touch. On branch `feat/consensus-synthesis` → **PR #5** (awaiting Justin's
+  merge). Regressions to watch: none expected — existing assertions unchanged; the short-answer
+  gate (`tokens.length <= 12`, single distinct number) keeps prose numbers from false-triggering.
+
 ## 7. Decisions Log  *(smart defaults made without Justin — record reasoning so they're not re-litigated)*
 
 - **2026-07-06 · Agent A · Canonical repo = `crucible-backend-`, not `Crucible-Code`.** The
