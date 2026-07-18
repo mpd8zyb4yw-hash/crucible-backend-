@@ -106,6 +106,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 |---|---|---|---|
 | _(none — App.tsx lock RELEASED)_ | | **A1 MERGED to `main` 2026-07-10** (commit merged into the on-device stack) — opt-in ensemble + `ensemble:false` on-device default is now live. Boot-test happens when the user launches the electron app. | |
 | _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` | All on-device ensemble tracks landed & benched on branch `claude/crucible-on-device-9jju3x` (see §6, 2026-07-10 entries). No placeholders remain. Needs a boot-test + merge by whoever can run the app with real ONNX weights. | |
+| **Agent A (reliability)** | `server.ts` pipeline core + `modelRegistry.ts` — **EXCLUSIVE LOCK** | Backend Reliability track (from the 2026-07-18 audit): (1) pre-dispatch token-budget guard, (2) provider rebalance-on-breaker-trip, (3) SSE async-throw safety harness. Branch `claude/crucible-audit-leverage-yozsom`. **Do NOT edit `server.ts` or `modelRegistry.ts` while this row stands.** | 2026-07-18 |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
@@ -176,6 +177,23 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   loop), then merge `phase-a1-frontend` → `main`. Left to do: **A3** (hide pipeline theater/log
   for on-device replies) and **Phase B** (molten-pour animation + tokens). `App.tsx` lock is
   released.
+- **[Agent A · 2026-07-18 · audit + lane split]** Ran a fresh audit of canonical `main`/tip
+  (HEAD `6ac82ef`, 2026-07-10 — code is current, ROADMAP prose lags ~1 month). Grep-confirmed
+  three real, still-unbuilt backend gaps: **no pre-dispatch token-budget guard** (only a comment
+  at `server.ts:999`; `413`s are handled reactively by breakers, which then falsely trip healthy
+  models), **no provider rebalance-on-breaker-trip** (the ≤25%-single-provider target in the
+  registry header has no enforcing mechanism), and the recurring **hung-SSE-on-unguarded-async-throw**
+  failure class the June-13 audit already paid for twice. I'm taking these as the **Backend
+  Reliability lane** and holding an EXCLUSIVE lock on `server.ts` + `modelRegistry.ts` (see §4).
+  **Agent B: please take a non-`server.ts` lane so we don't collide** — cleanest split is
+  frontend + hygiene: (a) PRIORITY-0 Phase A structural UI port in `src/App.tsx` (the A0 server
+  contract already landed, so this is frontend-only now), and (b) delete the committed root junk
+  (`server.ts.save` 177KB, `-` 685KB log-as-filename, empty `crucible@0.0.0` + `wait-on`,
+  `_cfdbg.ts`) and gitignore the redirect pattern. Both are zero-overlap with my lane. **Do NOT
+  take PRIORITY 1 (learning-loop wiring) yet — it edits `server.ts` call sites and would collide
+  with me.** Neither of us can boot the live pipeline in-sandbox (no external providers / native
+  deps), so keep all code on our own designated branches and let Justin gate the boot-test +
+  merge to `main`. Reply here with the lane you're taking before you touch code.
 
 ---
 
