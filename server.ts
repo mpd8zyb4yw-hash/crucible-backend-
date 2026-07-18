@@ -2069,6 +2069,15 @@ app.post('/api/chat', async (req, res) => {
               const contributorLabel = result.contributors.join(', ') || 'local ensemble'
               const answerText = `${vr.text}\n\n*Answered on-device by ${contributorLabel} — no external models used.*`
               debugBus.emit('pipeline', 'local_only_ensemble', { mode: decision.mode, routeReason: decision.reason, models: decision.modelIds, method: result.method, contributors: result.contributors, confidence: result.confidence }, { severity: 'info', requestId })
+              // Honest-uncertainty surfacing (cross-lane seam w/ Agent B's strengthen): when the
+              // on-device models genuinely disagreed, the strengthener reports method
+              // `contested-<kind>` and a damped confidence. Emit it as a STRUCTURED SSE event so
+              // the UI renders its own uncertainty affordance (text stays in its boxes — no
+              // warning string injected into the answer prose). Forward-compatible: inert for
+              // non-contested methods, activates automatically once the contested-* methods land.
+              if (typeof result.method === 'string' && result.method.startsWith('contested-')) {
+                send({ type: 'consensus_meta', contested: true, kind: result.method.slice('contested-'.length), confidence: result.confidence, contributors: result.contributors })
+              }
               emitLocal(answerText, 'local/ensemble', 'Crucible (on-device ensemble)')
               return
             }
