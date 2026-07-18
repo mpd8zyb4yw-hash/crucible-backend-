@@ -85,12 +85,46 @@ function main() {
   ])
   assert(prose.method !== 'contested-numeric', `incidental prose numbers do not manufacture a contradiction (got ${prose.method})`)
 
+  // ── contested yes/no: models split on polarity -> flagged + damped ──
+  const yesno = strengthen('is 51 a prime number', [
+    out('m1', 'Yes.'),
+    out('m2', 'No, it is not.'),
+    out('m3', 'Yes, it is prime.'),
+  ])
+  assert(yesno.method === 'contested-categorical', `split yes/no reports contested-categorical (got ${yesno.method})`)
+  assert(yesno.confidence < 0.5, `a contested yes/no falls below the free-tier floor (got ${yesno.confidence})`)
+
+  // ── contested single entity: models name different answers -> flagged + damped ──
+  const entity = strengthen('capital of australia', [
+    out('m1', 'Sydney'),
+    out('m2', 'The answer is Canberra.'),
+    out('m3', 'Melbourne'),
+  ])
+  assert(entity.method === 'contested-categorical', `split entity names report contested-categorical (got ${entity.method})`)
+  assert(entity.confidence < 0.5, `a contested entity answer falls below the floor (got ${entity.confidence})`)
+
+  // ── unanimous yes/no: agreement boosts confidence, no contradiction ──
+  const agreeYes = strengthen('is water wet', [
+    out('m1', 'Yes.'),
+    out('m2', 'Yes, it is.'),
+    out('m3', 'Yes.'),
+  ])
+  assert(agreeYes.method !== 'contested-categorical', `unanimous yes is not flagged contested (got ${agreeYes.method})`)
+  assert(agreeYes.confidence >= 0.7, `unanimous short categorical answer earns high confidence (got ${agreeYes.confidence})`)
+
+  // ── prose that merely starts with "yes" is NOT a short categorical payload ──
+  const proseYes = strengthen('explain recursion', [
+    out('m1', 'Yes indeed recursion is when a function calls itself to solve a smaller instance of the same problem repeatedly.'),
+    out('m2', 'No single base case means infinite recursion, so a terminating condition is what stops the self-referential calls.'),
+  ])
+  assert(proseYes.method !== 'contested-categorical', `long prose leading with yes/no is not a categorical contradiction (got ${proseYes.method})`)
+
   // ── confidence is always within the free-tier corroboration band ──
   for (const r of [one, consensus, salient, split]) {
     assert(r.confidence >= 0.5 && r.confidence <= 0.9, `confidence stays in [0.5,0.9] (got ${r.confidence})`)
   }
   // contested results may (intentionally) dip below the normal floor, but never below 0.3
-  for (const r of [contested, dissent]) {
+  for (const r of [contested, dissent, yesno, entity]) {
     assert(r.confidence >= 0.3 && r.confidence < 0.5, `contested confidence in [0.3,0.5) (got ${r.confidence})`)
   }
 

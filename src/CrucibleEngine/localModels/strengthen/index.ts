@@ -19,7 +19,9 @@
 //      number of corroborating models, and is damped when the pool is small or split.
 //   6. Short factual answers (a shared number / yes-no / one salient token across
 //      outputs) get a dedicated high-agreement boost — that's the case where cheap
-//      models most reliably converge on the truth.
+//      models most reliably converge on the truth. Symmetrically, when those short
+//      answers CONTRADICT (79 vs 95, "Yes" vs "No", "Paris" vs "London") confidence is
+//      damped below the floor and the split is surfaced as an honest-uncertainty signal.
 //
 // Track B depends only on the StrengthenResult shape (see ../contracts).
 
@@ -97,6 +99,50 @@ function numericConsensus(prepped: { tokens: string[] }[]): { agreement: number;
   return { agreement, contested }
 }
 
+// Polarity markers for yes/no answers. NOTE: `contentTokens` strips "no"/"not" as stopwords,
+// so polarity MUST be read from the raw text, not the token set.
+const AFFIRM = new Set(['yes', 'yeah', 'yep', 'yup', 'correct', 'true', 'affirmative', 'agreed', 'indeed'])
+const NEGATE = new Set(['no', 'nope', 'nah', 'false', 'incorrect', 'negative'])
+// Light framing words to peel off a one-entity answer ("the answer is Paris" -> "paris").
+const FRAMING = new Set(['answer', 'result', 'response', 'value', 'its'])
+
+/**
+ * Categorical-consensus signal — the short-answer sibling of {@link numericConsensus} for
+ * NON-numeric payloads. Two regimes, both meaningful only when the output is short (a terse
+ * reply is the answer; the same word inside prose is incidental):
+ *
+ *   • yes/no polarity — the reply LEADS with an affirmative/negative marker. Read from raw
+ *     text because "no"/"not" are stopword-stripped from the token set.
+ *   • single entity — after stopwords + light framing are removed exactly one non-numeric
+ *     content token remains ("Paris", "London"). That token is the answer value.
+ *
+ * Returns the same shape as numericConsensus: `agreement` (fraction sharing the top value,
+ * drives the salient boost) and `contested` (>=2 distinct values, no >=75% majority — a
+ * genuine "Yes" vs "No" or "Paris" vs "London" split that must LOWER confidence).
+ */
+function categoricalConsensus(prepped: { out: ModelOutput; tokens: string[] }[]): { agreement: number; contested: boolean } {
+  const valueOf = (p: { out: ModelOutput; tokens: string[] }): string | null => {
+    const words = p.out.text.toLowerCase().match(/[a-z']+/g) ?? []
+    if (words.length === 0 || words.length > 8) return null // only short replies carry a categorical payload
+    // yes/no polarity wins if the answer leads with a marker.
+    const first = words[0]
+    if (AFFIRM.has(first)) return 'yes'
+    if (NEGATE.has(first)) return 'no'
+    // single-entity: peel framing tokens, require exactly one remaining non-numeric token.
+    const core = p.tokens.filter(t => !FRAMING.has(t))
+    if (core.length === 1 && !/^\d+(\.\d+)?$/.test(core[0])) return core[0]
+    return null
+  }
+  const answers = prepped.map(valueOf).filter((v): v is string => v !== null)
+  if (answers.length < 2) return { agreement: 0, contested: false }
+  const counts = new Map<string, number>()
+  for (const v of answers) counts.set(v, (counts.get(v) ?? 0) + 1)
+  const top = Math.max(...counts.values())
+  const agreement = top / answers.length
+  const contested = counts.size >= 2 && agreement < 0.75
+  return { agreement, contested }
+}
+
 export function strengthen(_query: string, outputs: ModelOutput[]): StrengthenResult {
   const successful = outputs.filter(o => o.ok && o.text.trim().length > 0)
 
@@ -158,21 +204,25 @@ export function strengthen(_query: string, outputs: ModelOutput[]): StrengthenRe
   // short-answer agreement. Clamped to a sane free-tier ceiling — this is corroboration,
   // not certainty.
   const numeric = numericConsensus(prepped)
-  const salient = numeric.agreement
+  const categorical = categoricalConsensus(prepped)
+  // A contested SHORT answer — a split number OR a split yes-no / entity — is the strongest
+  // disagreement signal we have. Either kind damps trust identically.
+  const contested = numeric.contested || categorical.contested
+  const salient = Math.max(numeric.agreement, categorical.agreement)
   const corroborationFrac = contributors.length / n
   let confidence =
     0.45 +
     0.30 * clusterAgreement +       // do the backing outputs actually converge?
     0.15 * (corroborationFrac - 0.5) + // does a majority back the spine?
-    0.20 * (numeric.contested ? 0 : salient) // shared number boost — never while contested
-  // A contested factual number is the strongest DISagreement signal we have — actively damp
-  // trust and let confidence fall below the normal free-tier floor to report honest doubt.
-  if (numeric.contested) confidence -= 0.25
+    0.20 * (contested ? 0 : salient) // shared short-answer boost — never while contested
+  // Let a contested short answer fall below the normal free-tier floor to report honest doubt.
+  if (contested) confidence -= 0.25
   confidence = Math.min(0.9, confidence)
-  confidence = Math.max(numeric.contested ? 0.3 : 0.5, confidence)
+  confidence = Math.max(contested ? 0.3 : 0.5, confidence)
 
   const method =
     numeric.contested ? 'contested-numeric'
+    : categorical.contested ? 'contested-categorical'
     : salient >= 0.5 ? 'consensus-salient-agreement'
     : clusterAgreement >= 0.25 ? 'consensus-central'
     : 'central-low-agreement'
