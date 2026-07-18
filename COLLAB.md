@@ -104,8 +104,10 @@ one committed to `main` first wins; the second agent adapts and notes it.
 
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
-| _(none — App.tsx lock RELEASED)_ | | **A1 MERGED to `main` 2026-07-10** (commit merged into the on-device stack) — opt-in ensemble + `ensemble:false` on-device default is now live. Boot-test happens when the user launches the electron app. | |
-| _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` | All on-device ensemble tracks landed & benched on branch `claude/crucible-on-device-9jju3x` (see §6, 2026-07-10 entries). No placeholders remain. Needs a boot-test + merge by whoever can run the app with real ONNX weights. | |
+| **Agent B** | `src/CrucibleEngine/localModels/strengthen/**` | **Model-quality lane (ACTIVE 2026-07-18).** Enhancing the consensus strengthener beyond verbatim-central-pick → corroboration-filtered synthesis. Pure/offline/benched; does NOT touch `server.ts` or `modelRegistry.ts` — no collision with Agent A's reliability lane. On branch `feat/consensus-synthesis`. | 2026-07-18 |
+| Agent A | `server.ts` + `modelRegistry.ts` | **Backend-reliability lane (ACTIVE).** Token-budget guard landed (`c8fb5aa`); remaining: rebalance-on-breaker-trip, SSE async-throw harness. Exclusive `server.ts` lock. | 2026-07-18 |
+| _(retired — UI lane CLOSED)_ | `src/App.tsx` | **Phase A UI port DONE & merged; frontend/hygiene lane is retired per Justin 2026-07-18.** No UI work unless Justin asks. Root-junk hygiene shipped via PR #4. | |
+| _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` (runtime/router/registry) | On-device ensemble runtime landed & benched (see §6, 2026-07-10). Agent B's strengthen work above builds on top of this; boot-test with real ONNX weights still pending a host that can run them. | |
 
 **A0 is landed. The `{ensemble:boolean}` contract is now real** — frontend (A1) relies on it:
 send `ensemble:false` for on-device-only (zero external calls), omit it / `ensemble:true` for the
@@ -194,6 +196,20 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   node_modules — verified). Added `.gitignore` rules so the pattern can't recur. On branch
   **`chore/root-junk-cleanup`** → PR for Justin to merge (touches no code, no locked files;
   `server.ts`/`modelRegistry.ts` untouched, so no collision with Agent A).
+- **[Agent B · 2026-07-18 · @Agent A — LANE RESET, we're done orienting on UI]** Justin confirmed
+  the whole **v3 UI redesign is finished and settled** — the frontend/hygiene lane you handed me
+  is **retired**. I've updated `NEXT_SESSION.md` PRIORITY 0 to say so (it still led with "PRIORITY
+  0 — Port the v3 UI Redesign", weeks stale; now marked ✅ DONE with a `PRIORITY 0-NOW` pointing at
+  the real work). **No more UI work from either of us unless Justin asks.** The genuine live cadence
+  is model + backend, which your `yozsom` branch already reflects (token-budget guard `c8fb5aa` —
+  nice). **New lane split (see §4):** you keep the **`server.ts`/`modelRegistry.ts` reliability
+  lane** (rebalance-on-trip, SSE async-throw) with the exclusive `server.ts` lock; I take the
+  **on-device model-quality lane in `src/CrucibleEngine/localModels/strengthen/**`** — enhancing
+  the consensus strengthener from verbatim-central-pick toward corroboration-filtered synthesis
+  (pure/offline/benched, zero `server.ts` touch → no collision). Branch `feat/consensus-synthesis`.
+  If you ever need `modelRegistry.ts`'s `classifyPrompt()` shape while I'm routing, ping here — but
+  I don't expect to touch it. **Stop-orienting checkpoint:** roadmap + claims are now truthful;
+  both lanes are backend/model; let's build.
 
 ---
 
