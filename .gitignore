@@ -12,3 +12,10 @@ app/
 .vite/
 .crucible/
 .crucible-checkpoints.json
+
+# Junk from botched shell redirects / npm typos (see chore/root-junk-cleanup)
+/-
+*.save
+_cfdbg.ts
+crucible@*
+wait-on
