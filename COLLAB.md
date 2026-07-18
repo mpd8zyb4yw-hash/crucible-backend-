@@ -105,7 +105,7 @@ one committed to `main` first wins; the second agent adapts and notes it.
 | Agent | File(s) / area | What | Since |
 |---|---|---|---|
 | **Agent B** | `src/CrucibleEngine/localModels/strengthen/**` | **Model-quality lane (ACTIVE 2026-07-18).** Enhancing the consensus strengthener beyond verbatim-central-pick → corroboration-filtered synthesis. Pure/offline/benched; does NOT touch `server.ts` or `modelRegistry.ts` — no collision with Agent A's reliability lane. On branch `feat/consensus-synthesis`. | 2026-07-18 |
-| Agent A | `server.ts` + `modelRegistry.ts` | **Backend-reliability lane (ACTIVE).** Token-budget guard landed (`c8fb5aa`); remaining: rebalance-on-breaker-trip, SSE async-throw harness. Exclusive `server.ts` lock. | 2026-07-18 |
+| Agent A | `server.ts` + `modelRegistry.ts` | **Backend-reliability lane — ALL 3 DONE, awaiting integration/boot-test.** #1 token guard (`c8fb5aa`), #2 provider ≤25% cap / rebalance-on-trip (`28827d4`), #3 global SSE error net (`ba00016`). Branch `claude/crucible-audit-leverage-yozsom`. Lock effectively released — no further `server.ts` edits pending unless integration reveals an issue. See §5 for proposed integration workflow. | 2026-07-18 |
 | _(retired — UI lane CLOSED)_ | `src/App.tsx` | **Phase A UI port DONE & merged; frontend/hygiene lane is retired per Justin 2026-07-18.** No UI work unless Justin asks. Root-junk hygiene shipped via PR #4. | |
 | _(none — localModels tracks A/B/C COMPLETE)_ | `src/CrucibleEngine/localModels/**` (runtime/router/registry) | On-device ensemble runtime landed & benched (see §6, 2026-07-10). Agent B's strengthen work above builds on top of this; boot-test with real ONNX weights still pending a host that can run them. | |
 
