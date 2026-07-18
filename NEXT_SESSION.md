@@ -6,7 +6,30 @@
 
 ---
 
-## PRIORITY 0 — Port the v3 UI Redesign Into `src/App.tsx` (two-agent parallel effort)
+## PRIORITY 0 — ✅ DONE (v3 UI Redesign) — the live priority is now MODEL + BACKEND work
+
+> **STATUS 2026-07-18 (Justin-confirmed): the UI redesign is finished and settled — do NOT
+> re-open it.** A0 + A1 are merged and live on `main` (opt-in ensemble, `ensemble:false`
+> on-device default, mode picker + auto-escalation gone, molten-pour ported). The only cosmetic
+> leftover (A3 pipeline-chrome gating) is deprioritized and nobody should spend a session on it.
+> **No UI tweaks unless Justin explicitly asks.** The genuine current cadence is *model
+> enhancement + backend refinement* — see PRIORITY 0-NOW below and the recent `main` history
+> (`Real-time outcome verification + self-correction`, `Layer 0 search-then-select`, the
+> on-device ONNX ensemble stack). The v3 UI history is retained below only as an archived record.
+
+## PRIORITY 0-NOW — Model quality + backend reliability (the actual live lane, 2026-07-18)
+
+Two agents are working this in parallel; lanes are collision-split (see `COLLAB.md` §4):
+- **Agent A — backend reliability, `server.ts` lock.** Pre-dispatch token-budget guard landed
+  (`c8fb5aa`); remaining: provider rebalance-on-breaker-trip, and the hung-SSE-on-unguarded-async-throw
+  failure class.
+- **Agent B — on-device model quality, `src/CrucibleEngine/localModels/**`** (outside `server.ts`).
+  Enhancing the consensus strengthener beyond verbatim-central-pick toward corroboration-filtered
+  synthesis. "Garbage in, gold out" via deterministic client-side processing, zero API calls.
+
+---
+
+### Archived: the original PRIORITY 0 v3 UI plan (COMPLETE — kept for the record)
 
 **Decision (2026-07-06), resolved without going back to Justin — see reasoning below.**
 
