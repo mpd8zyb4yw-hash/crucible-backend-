@@ -328,3 +328,18 @@ exists — this `COLLAB.md` is the shared coordination file; use it instead of c
   when the client opts in OR `getRegistry()` reports >1 installed model. This is still inert with
   only Apple FM installed (pool size 1), so no existing environment changes; it only activates once
   a real second local model is present. Reversible (one condition), documented here.
+- **2026-07-18 · Agent A · Backend Reliability #1 (token-budget guard) SHIPPED (branch
+  `claude/crucible-audit-leverage-yozsom`, not yet merged)** — Root bug: `SelectedModel` never
+  carries `tpmLimit` (only `ModelEntry` does), so the pre-existing `callModel` guard
+  (`if (model.tpmLimit && …)`) and the short-preamble path in `withStaticPrefix` were **dead code**
+  — `model.tpmLimit` was always `undefined`. Meanwhile `callModelStreaming` (the Stage-1 fan-out
+  hot path) had NO guard. Fix: new shared `enforceInputBudget()` resolves the real cap via
+  `getModelEntry(id)?.tpmLimit`, **trims middle-out to fit** (does NOT throw — a large prompt must
+  not fail a healthy model and trip its breaker), ceiling = 90% of tpmLimit or a 28k-token backstop
+  for uncapped models. Wired into BOTH call paths; also revives the short-preamble optimization by
+  passing the real cap to `withStaticPrefix`. Emits `token_guard_trim` on the debug bus. Verified:
+  transpiles clean; 4-case standalone algorithm test passes (Groq-6k synthesis 14445→5354 tok,
+  no-cap backstop 50k→27953, small-payload passthrough, message count/roles preserved). Cannot
+  boot the live pipeline here (no providers/deps) — needs Justin's boot-test before merge.
+  Regression risk: low/additive — only shrinks oversized payloads, never touches in-budget ones.
+  Next in lane: #2 provider rebalance-on-breaker-trip.

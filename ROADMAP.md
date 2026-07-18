@@ -98,11 +98,17 @@ audit is the first time the real pipeline has actually run end-to-end on a real 
   pipeline-breaking TDZ bug that sat undetected for hours; a 2-minute smoke test after each session
   would have caught it immediately. *(This session: benchmark suite added — `npm run smoke`. The
   run-it-automatically-every-session hook is not yet built.)*
-- **[ ] Token budget guard** — no Stage 1 or Stage 5 model call should fire without a pre-dispatch
-  token estimate check against the target model's context window. `413` errors should be
-  *architecturally impossible*, not handled reactively by circuit breakers after the fact.
-  *(The Stage 5 `boundedSynthEntries()` cap is a partial mitigation; the general pre-dispatch
-  estimator is not built.)*
+- **[x] Token budget guard** — pre-dispatch `enforceInputBudget()` now runs on BOTH `callModel`
+  and `callModelStreaming` (the Stage-1 fan-out hot path, which previously had no guard at all).
+  Root bug found in the 2026-07-18 audit: `SelectedModel` never carries `tpmLimit` (only
+  `ModelEntry` does), so the old `if (model.tpmLimit && …)` guard and the short-preamble path
+  were **dead code** — `model.tpmLimit` was always `undefined`. Fixed by resolving the real cap
+  via `getModelEntry(id)?.tpmLimit`. The guard **trims middle-out to fit** rather than throwing,
+  so a large prompt no longer fails a healthy model and trips its breaker. Ceiling = 90% of
+  tpmLimit, or a 28k-token backstop for uncapped models, making the 8-models×~800-word Stage-5
+  `413` architecturally impossible. Emits `token_guard_trim` on the debug bus. Verified with a
+  4-case standalone test (Groq-6k synthesis, no-cap backstop, small-payload passthrough, message
+  count/roles preserved).
 
 ---
 

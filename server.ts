@@ -1012,20 +1012,69 @@ function withStaticPrefix(
   return [{ role: 'system', content: preamble }, ...messages]
 }
 
+// ── Pre-dispatch token-budget guard ─────────────────────────────────────────
+// SelectedModel does NOT carry tpmLimit (only ModelEntry does), so the real cap
+// must be looked up by id — passing `model.tpmLimit` yields undefined and the
+// guard silently no-ops. Always resolve through getModelEntry() here.
+//
+// tpmLimit is a per-MINUTE token budget, not a context window. We keep a single
+// request under 90% of it so one call can neither blow the whole minute nor 413
+// on the small free tiers (Groq 6k). Models with no declared cap still get a
+// generous backstop so an oversized Stage-5 synthesis payload (8 models x ~800
+// words) can never produce a 413. The governing rule (ROADMAP): a 413 must be
+// architecturally impossible, not caught reactively by a breaker after the fact.
+const DEFAULT_INPUT_CEILING_TOKENS = 28000
+function inputCeilingTokens(modelId: string): number {
+  const tpm = getModelEntry(modelId)?.tpmLimit
+  return tpm ? Math.floor(tpm * 0.9) : DEFAULT_INPUT_CEILING_TOKENS
+}
+
+// Trim a payload to fit under the ceiling by shrinking the largest non-system
+// messages middle-out (keep head+tail, drop the least load-bearing middle).
+// Preserves message count and roles so provider APIs stay happy. Trims rather
+// than throws: a healthy model must not be failed (and its breaker tripped) just
+// because the assembled prompt was large — we shrink and proceed.
+function enforceInputBudget(
+  modelId: string,
+  provider: string,
+  messages: { role: string; content: string }[],
+  requestId?: string,
+): { role: string; content: string }[] {
+  const ceiling = inputCeilingTokens(modelId)
+  const est = estimateMessageTokens(messages)
+  if (est <= ceiling) return messages
+  const out = messages.map(m => ({ ...m }))
+  let targetChars = (est - ceiling) * 4 + 200 // chars to shed (+small margin)
+  const order = out
+    .map((m, i) => ({ i, len: m.content.length, sys: m.role === 'system' }))
+    .filter(x => !x.sys)
+    .sort((a, b) => b.len - a.len)
+  for (const { i } of order) {
+    if (targetChars <= 0) break
+    const content = out[i].content
+    if (content.length <= 400) continue // too small to bother
+    const keep = Math.max(200, content.length - targetChars)
+    const head = Math.ceil(keep * 0.6)
+    const tail = keep - head
+    const trimmed = content.slice(0, head) + '\n…[trimmed to fit context budget]…\n' + content.slice(content.length - tail)
+    targetChars -= content.length - trimmed.length
+    out[i].content = trimmed
+  }
+  const finalEst = estimateMessageTokens(out)
+  console.warn(`[TokenGuard] trimmed payload for ${modelId}: ~${est} → ~${finalEst} tokens (ceiling ${ceiling})`)
+  debugBus.emit('model', 'token_guard_trim', { model: modelId, provider, fromTokens: est, toTokens: finalEst, ceiling }, { requestId, severity: 'warn' })
+  return out
+}
+
 async function callModel(
   model: SelectedModel,
   messages: { role: string; content: string }[],
   opts: { requestId?: string; timeoutMs?: number } = {},
 ): Promise<string> {
   const { id, provider } = model
-  messages = withStaticPrefix(messages, model.tpmLimit)
+  messages = withStaticPrefix(messages, getModelEntry(id)?.tpmLimit)
+  messages = enforceInputBudget(id, provider, messages, opts.requestId)
   const tokenEst = estimateMessageTokens(messages)
-  if (model.tpmLimit && tokenEst > model.tpmLimit) {
-    const msg = `Token budget exceeded: ~${tokenEst} tokens estimated, limit is ${model.tpmLimit} for ${id}`
-    console.warn(`[TokenGuard] ${msg}`)
-    debugBus.emit('model', 'token_guard_reject', { model: id, provider, tokenEst, tpmLimit: model.tpmLimit }, { requestId: opts.requestId, severity: 'warn' })
-    throw new Error(msg)
-  }
   recordProviderCall(provider)
   const t0 = Date.now()
   debugBus.emit('model', 'model_call', { model: id, provider, promptTokensEst: tokenEst }, { requestId: opts.requestId })
@@ -1233,7 +1282,8 @@ async function callModelStreaming(
   onChunk: (text: string) => void
 ): Promise<string> {
   const { id, provider } = model
-  messages = withStaticPrefix(messages, model.tpmLimit)
+  messages = withStaticPrefix(messages, getModelEntry(id)?.tpmLimit)
+  messages = enforceInputBudget(id, provider, messages)
   recordProviderCall(provider)
 
   if (provider === 'groq') {
